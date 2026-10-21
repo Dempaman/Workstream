@@ -57,7 +57,7 @@ export function AgentSetupHeader({
         <span className={cn("setup-state", saved ? "saved" : "suggested")}>
           {saved ? "Saved setup" : "Suggested from skill names"}
         </span>
-        <span className="muted-note">{skills.length} repository skills</span>
+        <span className="muted-note">{skills.length} skills</span>
         <Button
           variant="outline"
           size="sm"
@@ -121,7 +121,7 @@ export function RoleInstructions({
           </div>
           <div className="layer">
             <div className="layer-title">
-              <FileText size={13} /> 3. Repository skills
+              <FileText size={13} /> 3. Skills
             </div>
             {skills.length ? (
               <ul className="skill-list">
@@ -141,7 +141,11 @@ export function RoleInstructions({
                         }
                       />
                       <span>
-                        <strong>{skill.name}</strong>
+                        <strong>
+                          {skill.name}
+                          {skill.generated && <em className="skill-tag generated">Generated</em>}
+                          {skill.location === "workstream" && <em className="skill-tag">In Workstream</em>}
+                        </strong>
                         <small>
                           {skill.workflow
                             ? "Workflow skill: Workstream runs this flow itself, so it is not given to a single agent."
@@ -165,7 +169,8 @@ export function RoleInstructions({
               </ul>
             ) : (
               <p className="muted-note">
-                No skills found in .agents/skills, .codex/skills or .claude/skills.
+                No skills found in .agents/skills, .codex/skills or .claude/skills. Use
+                Generate skills above to write them from this project's code.
               </p>
             )}
           </div>

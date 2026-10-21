@@ -99,6 +99,7 @@ import {
   SessionInstructions,
   initialSetup,
 } from "@/components/AgentSetup";
+import { SkillGenerator } from "@/components/SkillGenerator";
 import {
   type Command,
   type Project,
@@ -1933,6 +1934,34 @@ function Agents({
         }}
         pending={pending}
       />
+      {setupProject && (
+        <SkillGenerator
+          project={setupProject}
+          snapshot={snapshot}
+          pending={pending}
+          send={async (command) => {
+            const next = await send(command);
+            const fresh = next?.projects.find((p) => p.id === setupProject.id);
+            if (!fresh) return next;
+            if (!setupDirty) setSetup(initialSetup(fresh));
+            else if (command.type === "saveGeneratedSkills" && fresh.agentSetup) {
+              // Keep your unsaved notes and ticks, and add the skills that were just saved.
+              const saved = fresh.agentSetup;
+              setSetup((current) =>
+                current
+                  ? (Object.fromEntries(
+                      (Object.keys(current) as Role[]).map((role) => [
+                        role,
+                        { ...current[role], skills: [...new Set([...current[role].skills, ...saved[role].skills])] },
+                      ]),
+                    ) as typeof current)
+                  : initialSetup(fresh),
+              );
+            }
+            return next;
+          }}
+        />
+      )}
       <div className="agent-grid">
         {(["planner", "developer", "reviewer"] as Role[]).map((role, i) => {
           const Icon = [BookOpen, Code2, ShieldCheck][i];

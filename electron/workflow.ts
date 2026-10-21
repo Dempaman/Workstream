@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readSkills, roleAddendum, roles } from "./agentsetup";
+import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
+import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -86,6 +87,7 @@ import type {
   Profile,
   Project,
   ProviderId,
+  SkillDraft,
 } from "../shared/types";
 import {
   azureAccount,
@@ -131,6 +133,8 @@ export class Workflow {
   private jiraImport?: JiraTicket;
   private transitions: Record<string, { id: string; name: string }[]> = {};
   private busy = new Set<string>();
+  /** Skill generator sessions: thread id -> project id. */
+  private skillThreads = new Map<string, string>();
   private cancellation = new Set<string>();
   private stopReasons = new Map<string, string>();
   constructor(
@@ -159,6 +163,9 @@ export class Workflow {
         ];
       }),
     ) as Record<Role, string>;
+    for (const project of store.state.projects)
+      if (project.skillDraft?.status === "working")
+        Object.assign(project.skillDraft, { status: "failed", error: "Workstream closed while generating. Generate again." });
     this.copilot = new Copilot();
     this.claude = new Claude(
       {
@@ -200,6 +207,11 @@ export class Workflow {
           session.usage = usage;
           this.emit();
         }
+        const draft = this.skillDraftFor(threadId);
+        if (draft) {
+          draft.usage = usage;
+          this.emit();
+        }
       });
       engine.on("heartbeat", (threadId: string) => {
         const run = this.findSession(threadId);
@@ -221,6 +233,11 @@ export class Workflow {
       engine.on("activity", (threadId: string, text: string) => {
         const run = this.findSession(threadId);
         if (run && text) this.log(run, text.slice(0, 3000));
+        const draft = this.skillDraftFor(threadId);
+        if (draft && text) {
+          draft.activity = [...draft.activity, text.replace(/\s+/g, " ").slice(0, 300)].slice(-6);
+          this.emit();
+        }
       });
       engine.on("turn", (threadId: string, turnId: string) => {
         const run = this.findSession(threadId);
@@ -910,15 +927,56 @@ export class Workflow {
       }
       case "refreshSkills": {
         const project = this.getProject(command.projectId);
-        project.skillInfo = await readSkills(project.path);
+        project.skillInfo = await readSkills(project.path, this.appSkills(project));
         project.skills = project.skillInfo.map((skill) => skill.path);
+        break;
+      }
+      case "generateSkills": {
+        const project = this.getProject(command.projectId);
+        if (project.skillDraft?.status === "working") throw new Error("Skills are already being generated for this project.");
+        void this.generateSkills(project);
+        break;
+      }
+      case "cancelSkillGeneration": {
+        const project = this.getProject(command.projectId);
+        const draft = project.skillDraft;
+        if (draft?.status === "working") {
+          if (draft.threadId) await this.engineFor(draft.engine).interrupt(draft.threadId).catch(() => {});
+          Object.assign(draft, { status: "failed", error: "Stopped.", finishedAt: new Date().toISOString() });
+        }
+        break;
+      }
+      case "discardSkillDraft": {
+        const project = this.getProject(command.projectId);
+        if (project.skillDraft?.status === "working") throw new Error("Stop the generation first.");
+        project.skillDraft = undefined;
+        break;
+      }
+      case "saveGeneratedSkills": {
+        const project = this.getProject(command.projectId);
+        if (project.skillDraft?.status === "working") throw new Error("Wait until the skills are generated.");
+        const names = command.skills.map((skill) => skill.name);
+        if (new Set(names).size !== names.length) throw new Error("Give each skill its own name.");
+        const paths = await saveSkills(project.path, this.appSkills(project), command.location, command.skills);
+        project.skillInfo = await readSkills(project.path, this.appSkills(project));
+        project.skills = project.skillInfo.map((skill) => skill.path);
+        // Give each saved skill to its roles, keeping everything already chosen.
+        const setup = structuredClone(effectiveSetup(project));
+        command.skills.forEach((skill, i) => {
+          for (const role of roles) {
+            const list = setup[role].skills.filter((path) => path !== paths[i]);
+            setup[role].skills = skill.roles.includes(role) ? [...list, paths[i]] : list;
+          }
+        });
+        project.agentSetup = setup;
+        project.skillDraft = undefined;
         break;
       }
       case "openSkill": {
         const project = this.getProject(command.projectId);
         if (!(project.skillInfo ?? []).some((skill) => skill.path === command.path))
           throw new Error("Unknown repository skill.");
-        await this.openUrl(pathToFileURL(join(project.path, command.path, "SKILL.md")).href);
+        await this.openUrl(pathToFileURL(skillFile(project.path, command.path, this.appSkills(project))).href);
         break;
       }
       case "memoryList":
@@ -1432,7 +1490,7 @@ export class Workflow {
     // A change request plans against the PR branch, not whatever the repo folder has checked out.
     const cwd = role === "planner" && !revision ? project.path : run.worktree!;
     const instructions = this.rules[role];
-    const addendum = verification ? undefined : await roleAddendum(project, role);
+    const addendum = verification ? undefined : await roleAddendum(project, role, this.appSkills(project));
     const efficiency =
       role === "reviewer"
         ? "Use the host's fresh check results for the unchanged diff. Avoid rerunning identical passing commands unless repository instructions require it or a concrete concern needs a targeted check. Inspect retained browser evidence; do not repeatedly attempt browser setup in a read-only stage. Report unavailable environment/data as an acceptance gap, not a code defect."
@@ -1951,10 +2009,86 @@ export class Workflow {
       this.emit();
     }
   }
+  private appSkills(project: Project) {
+    return appSkillDir(this.store.directory, project.id);
+  }
+  private skillDraftFor(threadId: string) {
+    const projectId = this.skillThreads.get(threadId);
+    return projectId ? this.store.state.projects.find((p) => p.id === projectId)?.skillDraft : undefined;
+  }
+  /**
+   * Runs one read-only agent (the planner's engine and model) that studies the
+   * repository and drafts develop, testing and review skills. Nothing is written
+   * until you save the draft.
+   */
+  private async generateSkills(project: Project) {
+    const profile = { ...this.store.state.settings.profiles.planner };
+    const engineName: Engine = profile.engine ?? "codex";
+    const draft: SkillDraft = {
+      status: "working",
+      startedAt: new Date().toISOString(),
+      engine: engineName,
+      activity: [],
+      skills: [],
+    };
+    project.skillDraft = draft;
+    this.emit();
+    try {
+      const engine = this.engineFor(engineName);
+      if (engineName === "copilot") {
+        if (!this.copilot.runtime.authenticated) await this.copilot.connect(this.store.state.settings.copilotPath);
+      } else if (engineName === "claude") await this.claude.connect(this.claudePath, this.claudeAuth);
+      else await this.codex.connect(this.store.state.settings.codexPath);
+      const model =
+        engine.runtime.models.find((m) => m.id === profile.model) ?? engine.runtime.models.find((m) => m.isDefault);
+      if (model) {
+        profile.model = model.id;
+        if (!model.efforts.includes(profile.effort)) profile.effort = model.defaultEffort;
+      }
+      draft.model = profile.model || undefined;
+      project.stack = await readStack(project.path).catch(() => project.stack);
+      const existing = (project.skillInfo ?? []).filter((skill) => !skill.generated && !skill.workflow);
+      const threadId = await engine.startThread(project.path, profile, generatorInstructions, false, [], project.path);
+      draft.threadId = threadId;
+      this.skillThreads.set(threadId, project.id);
+      this.emit();
+      const text = await engine.run(threadId, generatorPrompt(project, existing), z.toJSONSchema(skillDraftSchema), profile);
+      if (project.skillDraft !== draft || draft.status !== "working") return;
+      const result = skillDraftSchema.parse(JSON.parse(text));
+      const skills = result.skills
+        .filter((skill) => skill.body.trim().length >= 50)
+        .map((skill) => ({
+          kind: skill.kind,
+          name: skillName(project, skill.kind),
+          description: skill.description.trim() || `${project.name}: ${skill.kind} conventions.`,
+          body: skill.body.trim(),
+        }));
+      if (!skills.length) throw new Error("The agent returned no usable skills. Try again, or with another model.");
+      Object.assign(draft, {
+        status: "ready",
+        finishedAt: new Date().toISOString(),
+        summary: result.summary,
+        filesRead: result.filesRead,
+        skills,
+      });
+    } catch (error) {
+      if (project.skillDraft === draft && draft.status === "working")
+        Object.assign(draft, {
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          error: error instanceof SyntaxError || error instanceof z.ZodError
+            ? "The agent did not return valid skills. Try again."
+            : error instanceof Error ? error.message : String(error),
+        });
+    } finally {
+      if (draft.threadId) this.skillThreads.delete(draft.threadId);
+      this.emit();
+    }
+  }
   /** Reads each project's repository skills at start-up so the Agents page is current. */
   async refreshAllSkills() {
     for (const project of this.store.state.projects.filter((p) => !p.archived)) {
-      project.skillInfo = await readSkills(project.path).catch(() => project.skillInfo ?? []);
+      project.skillInfo = await readSkills(project.path, this.appSkills(project)).catch(() => project.skillInfo ?? []);
       project.skills = project.skillInfo.map((skill) => skill.path);
     }
     this.emit();

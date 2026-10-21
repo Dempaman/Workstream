@@ -123,8 +123,45 @@ export interface SkillInfo {
   description: string;
   /** Describes a whole delivery workflow; Workstream itself plays that part. */
   workflow: boolean;
+  /** Written by Workstream's "Generate project skills" (can be regenerated). */
+  generated?: boolean;
+  /** Kept in Workstream's own folder instead of the repository. */
+  location?: "workstream";
 }
 export type AgentSetup = Record<Role, { skills: string[]; notes: string }>;
+export const skillKinds = ["develop", "testing", "review"] as const;
+export type SkillKind = (typeof skillKinds)[number];
+/** Which roles a generated skill is given to by default. */
+export const skillKindRoles: Record<SkillKind, Role[]> = {
+  develop: ["planner", "developer"],
+  testing: ["planner", "developer", "reviewer"],
+  review: ["reviewer"],
+};
+export interface GeneratedSkill {
+  kind: SkillKind;
+  /** Folder and frontmatter name, for example shop-develop. */
+  name: string;
+  /** When an agent should use it (frontmatter description). */
+  description: string;
+  body: string;
+}
+/** A draft from "Generate project skills": nothing is written until you save it. */
+export interface SkillDraft {
+  status: "working" | "ready" | "failed";
+  startedAt: string;
+  finishedAt?: string;
+  engine: Engine;
+  model?: string;
+  threadId?: string;
+  /** Latest things the agent reported doing, newest last. */
+  activity: string[];
+  usage?: TokenUsage;
+  error?: string;
+  /** What the agent looked at, in its own words. */
+  summary?: string;
+  filesRead?: string[];
+  skills: GeneratedSkill[];
+}
 /** An MCP connector as shown in the Connectors page. Never contains tokens. */
 export interface ConnectorStatus {
   id: string;
@@ -191,6 +228,8 @@ export interface Project {
   skillInfo?: SkillInfo[];
   /** Saved per-role skills and notes. Missing means the suggested mapping is used. */
   agentSetup?: AgentSetup;
+  /** The latest "Generate project skills" draft, until saved or discarded. */
+  skillDraft?: SkillDraft;
   id: string;
   name: string;
   path: string;
@@ -555,6 +594,26 @@ export const commandSchema = z.discriminatedUnion("type", [
       .nullable(),
   }),
   z.object({ type: z.literal("refreshSkills"), projectId: z.string() }),
+  z.object({ type: z.literal("generateSkills"), projectId: z.string() }),
+  z.object({ type: z.literal("cancelSkillGeneration"), projectId: z.string() }),
+  z.object({ type: z.literal("discardSkillDraft"), projectId: z.string() }),
+  z.object({
+    type: z.literal("saveGeneratedSkills"),
+    projectId: z.string(),
+    location: z.enum(["repository", "workstream"]),
+    skills: z
+      .array(
+        z.object({
+          kind: z.enum(skillKinds),
+          name: z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/),
+          description: z.string().trim().min(10).max(600),
+          body: z.string().trim().min(50).max(40000),
+          roles: z.array(z.enum(["planner", "developer", "reviewer"])).max(3),
+        }),
+      )
+      .min(1)
+      .max(3),
+  }),
   z.object({ type: z.literal("openSkill"), projectId: z.string(), path: z.string().max(300) }),
   z.object({ type: z.literal("checkoutInRepo"), runId: z.string() }),
   z.object({ type: z.literal("switchRepoBack"), runId: z.string() }),
