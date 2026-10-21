@@ -5463,3 +5463,37 @@ ul.tech-stack.tech-stack {
   font-weight: 600;
   color: #0891b2;
 }
+.e2e-source {
+  margin-bottom: 2px;
+}
+.journey-title {
+  flex: 1;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.journey-title code {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: light-dark(#4a5565, #9aa8bd);
+}
+.e2e-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: light-dark(#14532d, #bbf7d0);
+  background: light-dark(#ecf8f2, #13261f);
+}
+.e2e-pill.skipped {
+  color: light-dark(#8a5a00, #f2c15e);
+  background: light-dark(#fff7e6, #2c2414);
+}
+.journey.skipped {
+  border-left-color: #d97706;
+}

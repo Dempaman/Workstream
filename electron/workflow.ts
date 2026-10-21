@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
-import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, pruneRuns, record, runJourney, showTrace } from "./e2e";
+import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
 import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
 import { dirname, join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -942,8 +942,10 @@ export class Workflow {
         const project = this.getProject(command.projectId);
         assertLocal(command.baseUrl);
         if (command.password !== undefined) this.secrets.set(`e2e-password:${project.id}`, command.password ?? undefined);
+        project.e2eConfig = await repoConfig(project.path);
         project.e2e = {
           ...project.e2e,
+          ...(command.source ? { source: command.source } : {}),
           baseUrl: command.baseUrl,
           browser: command.browser,
           headed: command.headed,
@@ -966,16 +968,17 @@ export class Workflow {
         const project = this.getProject(command.projectId);
         const settings = this.e2eSettings(project);
         if (project.e2eActivity) throw new Error("Wait for the current recording or test run.");
-        if (command.journeyId) this.journey(project, command.journeyId);
-        void this.recordJourney(project, settings, command.name, command.journeyId);
+        if (command.journeyId && !this.repoMode(project)) this.journey(project, command.journeyId);
+        void this.recordJourney(project, settings, command.name, this.repoMode(project) ? undefined : command.journeyId);
         break;
       }
       case "e2eRun": {
         const project = this.getProject(command.projectId);
         const settings = this.e2eSettings(project);
         if (project.e2eActivity) throw new Error("Wait for the current recording or test run.");
-        const journeys = (project.journeys ?? []).filter((j) => !command.journeyIds || command.journeyIds.includes(j.id));
-        if (!journeys.length) throw new Error("Record a journey first.");
+        const repo = this.repoMode(project);
+        const journeys = repo ? [] : (project.journeys ?? []).filter((j) => !command.journeyIds || command.journeyIds.includes(j.id));
+        if (!repo && !journeys.length) throw new Error("Record a journey first.");
         let run: Run | undefined;
         if (command.runId) {
           run = this.getRun(command.runId);
@@ -987,7 +990,23 @@ export class Workflow {
         }
         if (!(await this.siteReachable(project, settings)))
           throw new Error(`Nothing answers at ${settings.baseUrl}. Start the site first (Start localhost), then run the tests.`);
-        void this.runJourneys(project, settings, journeys.map((j) => j.id), run);
+        if (repo) void this.runRepoTests(project, settings, command.journeyIds, run);
+        else void this.runJourneys(project, settings, journeys.map((j) => j.id), run);
+        break;
+      }
+      case "e2eListRepo": {
+        const project = this.getProject(command.projectId);
+        project.e2eConfig = await repoConfig(project.path);
+        if (!project.e2eConfig || !project.e2e) break;
+        const listed = await runRepoSuite({
+          repo: project.path,
+          dir: this.e2eFolder(project),
+          settings: project.e2e,
+          list: true,
+        });
+        const previous = new Map((project.repoTests ?? []).map((t) => [t.id, t.result]));
+        project.repoTests = listed.tests.map((t) => ({ ...t, ...(previous.get(t.id) ? { result: previous.get(t.id) } : {}) }));
+        project.e2eError = listed.error;
         break;
       }
       case "e2eStop": {
@@ -1010,9 +1029,13 @@ export class Workflow {
       }
       case "e2eOpen": {
         const project = this.getProject(command.projectId);
-        const journey = this.journey(project, command.journeyId);
-        const result = journey.lastResult;
-        if (command.what === "code") await this.openUrl(pathToFileURL(journeyFile(this.e2eFolder(project), journey.id)).href);
+        const repoTest = this.repoMode(project) ? project.repoTests?.find((t) => t.id === command.journeyId) : undefined;
+        const journey = repoTest ? undefined : this.journey(project, command.journeyId);
+        const result = repoTest ? repoTest.result : journey!.lastResult;
+        if (command.what === "code")
+          await this.openUrl(
+            pathToFileURL(repoTest ? repoFile(project.path, repoTest.file) : journeyFile(this.e2eFolder(project), journey!.id)).href,
+          );
         else if (command.what === "trace") {
           if (!result?.trace) throw new Error("This run has no trace.");
           await showTrace(project.path, result.trace);
@@ -2101,6 +2124,64 @@ export class Workflow {
       this.emit();
     }
   }
+  /** Whether this project runs the repository's own Playwright suite. */
+  private repoMode(project: Project) {
+    return (project.e2e?.source ?? (project.e2eConfig ? "repository" : "workstream")) === "repository" && Boolean(project.e2eConfig);
+  }
+  /** Runs the repository's suite (all tests, or the chosen file:line ids) and records the results. */
+  private async runRepoTests(project: Project, settings: NonNullable<Project["e2e"]>, only: string[] | undefined, run?: Run) {
+    const controller = new AbortController();
+    this.e2eControllers.set(project.id, controller);
+    project.e2eError = undefined;
+    project.e2eNotice = undefined;
+    const names = (project.repoTests ?? []).filter((t) => !only || only.includes(t.id)).map((t) => t.title);
+    const activity: NonNullable<Project["e2eActivity"]> = {
+      kind: "running",
+      runId: run?.id,
+      journeyId: only?.length === 1 ? only[0] : undefined,
+      startedAt: new Date().toISOString(),
+      queue: [],
+      current: only?.length === 1 ? names[0] : `the repository's E2E tests (${project.e2eConfig})`,
+      output: [],
+    };
+    project.e2eActivity = activity;
+    if (run) this.log(run, `Running the repository's end-to-end tests on ${settings.baseUrl}.`);
+    this.emit();
+    try {
+      const outcome = await runRepoSuite({
+        repo: project.path,
+        dir: this.e2eFolder(project),
+        settings,
+        password: this.secrets.get(`e2e-password:${project.id}`),
+        only,
+        signal: controller.signal,
+        onOutput: (line) => {
+          activity.output = [...activity.output, line].slice(-6);
+          this.emit();
+        },
+      });
+      const previous = new Map((project.repoTests ?? []).map((t) => [t.id, t]));
+      for (const test of outcome.tests) previous.set(test.id, { ...previous.get(test.id), ...test, result: test.result ?? previous.get(test.id)?.result });
+      project.repoTests = [...previous.values()];
+      project.e2eError = outcome.error;
+      if (run)
+        for (const test of outcome.tests.filter((t) => t.result)) {
+          const result = { ...test.result!, branch: run.branch };
+          run.e2e = [...(run.e2e ?? []).filter((e) => e.journeyId !== test.id), { journeyId: test.id, name: test.title, result }];
+          this.log(run, `End-to-end "${test.title}": ${result.status}${result.error ? `. ${result.error.split("\n")[0]}` : ""}`.slice(0, 600), result.status === "passed" ? "success" : "error");
+        }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        project.e2eError = error instanceof Error ? error.message.slice(0, 1500) : String(error);
+        if (run) this.log(run, `End-to-end tests could not run: ${project.e2eError}`.slice(0, 600), "error");
+      }
+    } finally {
+      project.e2eActivity = undefined;
+      this.e2eControllers.delete(project.id);
+      await pruneRunsIn(this.e2eFolder(project)).catch(() => {});
+      this.emit();
+    }
+  }
   private e2eFolder(project: Project) {
     return e2eDir(this.store.directory, project.id);
   }
@@ -2137,6 +2218,13 @@ export class Workflow {
       const raw = await record(project.path, this.e2eFolder(project), settings, settings.baseUrl, controller.signal);
       const code = cleanRecording(raw, { username: settings.username, password });
       if (containsSecret(code, password)) throw new Error("The recording still contains the password. It was not saved.");
+      if (this.repoMode(project)) {
+        const path = await saveToRepo(project.path, name, code);
+        project.e2eActivity = undefined;
+        project.e2eNotice = `Saved as ${path} in the repository. Commit it when you are happy with it.`;
+        await this.command({ type: "e2eListRepo", projectId: project.id }).catch(() => {});
+        return;
+      }
       const id = journeyId ?? randomUUID();
       const file = journeyFile(this.e2eFolder(project), id);
       await mkdir(dirname(file), { recursive: true });
@@ -2291,6 +2379,7 @@ export class Workflow {
   async refreshAllSkills() {
     for (const project of this.store.state.projects.filter((p) => !p.archived)) {
       project.skillInfo = await readSkills(project.path, this.appSkills(project)).catch(() => project.skillInfo ?? []);
+      project.e2eConfig = await repoConfig(project.path).catch(() => project.e2eConfig);
       project.skills = project.skillInfo.map((skill) => skill.path);
     }
     this.emit();

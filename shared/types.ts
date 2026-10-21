@@ -155,12 +155,15 @@ export interface E2eSettings {
   /** Test account user name. The password is kept encrypted, outside state.json. */
   username?: string;
   hasPassword?: boolean;
+  /** Run the repository's own Playwright suite (npm run test:e2e) or journeys kept in Workstream. */
+  source?: "repository" | "workstream";
   /** Last reachability check of baseUrl. */
   reachable?: boolean;
   checkedAt?: string;
 }
 export interface E2eResult {
-  status: "passed" | "failed" | "error";
+  /** skipped: the test is marked fixme or skip, for example because its steps still need recording. */
+  status: "passed" | "failed" | "error" | "skipped";
   startedAt: string;
   durationMs: number;
   /** First lines of the failure, without secrets. */
@@ -170,6 +173,15 @@ export interface E2eResult {
   video?: string;
   /** The task branch the repository had checked out, when run from a task. */
   branch?: string;
+}
+/** A test in the repository's own E2E suite. */
+export interface RepoTest {
+  /** file:line, which Playwright also accepts to run just this test. */
+  id: string;
+  title: string;
+  file: string;
+  line: number;
+  result?: E2eResult;
 }
 /** A recorded user flow, such as log in, add to cart and check out. */
 export interface Journey {
@@ -280,6 +292,11 @@ export interface Project {
   e2eActivity?: E2eActivity;
   /** The last recording or run error shown on the E2E page. */
   e2eError?: string;
+  /** The repository's playwright.config file, when it has its own E2E suite. */
+  e2eConfig?: string;
+  /** A short success message on the E2E page, such as where a recording was saved. */
+  e2eNotice?: string;
+  repoTests?: RepoTest[];
   id: string;
   name: string;
   path: string;
@@ -653,6 +670,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     baseUrl: z.string().trim().url().max(500),
     browser: z.enum(["msedge", "chrome"]),
     headed: z.boolean(),
+    source: z.enum(["repository", "workstream"]).optional(),
     username: z.string().trim().max(300).optional(),
     /** Omit to keep the saved password; null removes it. */
     password: z.string().min(1).max(500).nullable().optional(),
@@ -660,6 +678,7 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("e2eRecord"), projectId: z.string(), name: z.string().trim().min(1).max(120), journeyId: z.string().optional() }),
   z.object({ type: z.literal("e2eRun"), projectId: z.string(), journeyIds: z.array(z.string()).max(50).optional(), runId: z.string().optional() }),
   z.object({ type: z.literal("e2eStop"), projectId: z.string() }),
+  z.object({ type: z.literal("e2eListRepo"), projectId: z.string() }),
   z.object({ type: z.literal("e2eDelete"), projectId: z.string(), journeyId: z.string() }),
   z.object({ type: z.literal("e2eRename"), projectId: z.string(), journeyId: z.string(), name: z.string().trim().min(1).max(120) }),
   z.object({ type: z.literal("e2eOpen"), projectId: z.string(), journeyId: z.string(), what: z.enum(["code", "screenshot", "trace", "video", "folder"]) }),

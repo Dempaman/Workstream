@@ -1,7 +1,7 @@
 import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { E2eResult, E2eSettings } from "../shared/types";
+import type { E2eResult, E2eSettings, RepoTest } from "../shared/types";
 import { execute } from "./process";
 
 /** Environment variable names the recorded test reads the account from. */
@@ -93,7 +93,7 @@ export async function record(
     node,
     [cli, "codegen", "--target", "playwright-test", "--channel", settings.browser, "--viewport-size", "1366,900", "--output", output, assertLocal(url).href],
     dir,
-    { signal, windowsHide: true, env: nodeEnv },
+    { signal, windowsHide: true, env: nodeEnv, timeout: 3 * 60 * 60_000 },
   ).catch((error: unknown) => {
     if (signal?.aborted) throw new Error("Recording stopped.");
     throw error;
@@ -198,6 +198,7 @@ export async function runJourney(options: {
   const redact = (text: string) => (password ? text.split(password).join("********") : text);
   const result = await execute(node, [cli, "test", "--config", configFile], runDir, {
     signal: options.signal,
+    timeout: 30 * 60_000,
     env: { ...nodeEnv, [userVar]: settings.username ?? "", [passwordVar]: password ?? "", PLAYWRIGHT_HTML_OPEN: "never", FORCE_COLOR: "0" },
     onOutput: (text) => {
       for (const line of redact(text).split(/\r?\n/).map((l) => l.replace(ansi, "").trim()).filter(Boolean)) options.onOutput?.(line.slice(0, 300));
@@ -218,13 +219,159 @@ export async function runJourney(options: {
 }
 
 /** Keeps the latest runs per project and removes older run folders. */
-export async function pruneRuns(dir: string, keep = 20) {
-  const runs = (await readdir(join(dir, "runs")).catch(() => [])).sort();
-  for (const old of runs.slice(0, Math.max(0, runs.length - keep))) await rm(join(dir, "runs", old), { recursive: true, force: true });
+export async function pruneRuns(dir: string, keep = 20, folder = "runs") {
+  const runs = (await readdir(join(dir, folder)).catch(() => [])).sort();
+  for (const old of runs.slice(0, Math.max(0, runs.length - keep))) await rm(join(dir, folder, old), { recursive: true, force: true });
+}
+export const pruneRunsIn = (dir: string) => pruneRuns(dir, 20, "repo-runs");
+
+/** A repository-relative test file, refusing paths that leave the repository. */
+export function repoFile(repo: string, file: string) {
+  const full = resolve(repo, file);
+  const rel = relative(resolve(repo), full);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error("Unknown test file.");
+  return full;
 }
 
 /** Opens Playwright's trace viewer for a failed or passed run. */
 export async function showTrace(repo: string, trace: string) {
   const cli = await playwrightCli(repo);
-  void execute(node, [cli, "show-trace", trace], repo, { env: nodeEnv }).catch(() => {});
+  void execute(node, [cli, "show-trace", trace], repo, { env: nodeEnv, timeout: 12 * 60 * 60_000 }).catch(() => {});
+}
+
+/** The repository's own Playwright config, when it has one (then Workstream runs that suite). */
+export async function repoConfig(repo: string) {
+  for (const name of ["playwright.config.ts", "playwright.config.mts", "playwright.config.js", "playwright.config.mjs"]) {
+    try {
+      await access(join(repo, name));
+      return name;
+    } catch {
+      /* next */
+    }
+  }
+  return undefined;
+}
+
+export type { RepoTest } from "../shared/types";
+interface SpecNode {
+  title: string;
+  file: string;
+  line: number;
+  tests?: { status?: string; annotations?: { type: string }[]; results?: ReportResult[] }[];
+}
+interface SuiteNode {
+  specs?: SpecNode[];
+  suites?: SuiteNode[];
+}
+
+/** Every test in a Playwright JSON report, with its result when it ran. */
+export function repoTests(report: { suites?: SuiteNode[] }, startedAt: string, redact: (text: string) => string, prefix = ""): RepoTest[] {
+  const out: RepoTest[] = [];
+  const walk = (suite: SuiteNode) => {
+    for (const spec of suite.specs ?? []) {
+      const test = spec.tests?.[0];
+      const last = test?.results?.at(-1);
+      const skipped = test?.status === "skipped" || test?.annotations?.some((a) => a.type === "fixme" || a.type === "skip");
+      const file = `${prefix}${spec.file.replace(/\\/g, "/")}`;
+      out.push({
+        id: `${file}:${spec.line}`,
+        title: spec.title,
+        file,
+        line: spec.line,
+        ...(last
+          ? {
+              result: skipped
+                ? { status: "skipped" as const, startedAt, durationMs: last.duration }
+                : parseReport({ suites: [{ specs: [{ tests: [{ results: [last] }] }] }] }, startedAt, redact),
+            }
+          : {}),
+      });
+    }
+    for (const child of suite.suites ?? []) walk(child);
+  };
+  for (const suite of report.suites ?? []) walk(suite);
+  return out;
+}
+
+/**
+ * Runs the repository's own E2E suite (npm run test:e2e's Playwright) on what
+ * the repository folder has checked out. Workstream passes the test account and
+ * address through the environment and keeps reports and artifacts in its own
+ * folder, so nothing is written into the repository.
+ */
+export async function runRepoSuite(options: {
+  repo: string;
+  dir: string;
+  settings: E2eSettings;
+  password?: string;
+  only?: string[];
+  list?: boolean;
+  signal?: AbortSignal;
+  onOutput?: (line: string) => void;
+}) {
+  const { repo, dir, settings, password } = options;
+  const startedAt = new Date().toISOString();
+  assertLocal(settings.baseUrl);
+  const cli = await playwrightCli(repo);
+  const config = await repoConfig(repo);
+  if (!config) throw new Error("This repository has no playwright.config file.");
+  const runDir = join(dir, "repo-runs", startedAt.replace(/[:.]/g, "-"));
+  await mkdir(runDir, { recursive: true });
+  const reportFile = join(runDir, "report.json");
+  const redact = (text: string) => (password ? text.split(password).join("********") : text);
+  const args = [cli, "test", "--config", config, "--reporter=json,line", "--output", join(runDir, "artifacts")];
+  if (options.list) args.push("--list");
+  else if (settings.headed) args.push("--headed");
+  for (const id of options.only ?? []) {
+    if (!/^[\w./ -]+:\d+$/.test(id)) throw new Error("Unknown test.");
+    args.push(id);
+  }
+  const result = await execute(node, args, repo, {
+    signal: options.signal,
+    // Long enough for the dev server to start and every journey to finish.
+    timeout: options.list ? 2 * 60_000 : 60 * 60_000,
+    env: {
+      ...nodeEnv,
+      E2E_BASE_URL: settings.baseUrl,
+      E2E_BROWSER: settings.browser,
+      ...(settings.username ? { E2E_USERNAME: settings.username } : {}),
+      ...(password ? { E2E_PASSWORD: password } : {}),
+      PLAYWRIGHT_JSON_OUTPUT_NAME: reportFile,
+      PLAYWRIGHT_HTML_OPEN: "never",
+      FORCE_COLOR: "0",
+    },
+    onOutput: (text) => {
+      for (const line of redact(text).split(/\r?\n/).map((l) => l.replace(ansi, "").trim()).filter(Boolean)) options.onOutput?.(line.slice(0, 300));
+    },
+  }).catch((error: unknown) => {
+    if (options.signal?.aborted) throw new Error("Stopped.");
+    throw error;
+  });
+  const report = await readFile(reportFile, "utf8").then((text) => JSON.parse(text), () => undefined);
+  if (!report) throw new Error(redact(result.output.replace(ansi, "")).slice(-1500) || "Playwright did not start.");
+  const errors = (report.errors ?? []).map((e: { message?: string }) => redact(e.message ?? "").replace(ansi, "")).filter(Boolean);
+  // Spec files are relative to the suite's testDir; make them relative to the repository.
+  const rootDir = typeof report.config?.rootDir === "string" ? relative(repo, report.config.rootDir).replace(/\\/g, "/") : "";
+  const prefix = rootDir && !rootDir.startsWith("..") ? `${rootDir}/` : "";
+  return { startedAt, tests: repoTests(report, startedAt, redact, prefix), error: errors.join("\n").slice(0, 1500) || undefined };
+}
+
+/** Saves a recording into the repository's e2e folder, with the account read from the environment. */
+export async function saveToRepo(repo: string, name: string, code: string) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "journey";
+  const file = join(repo, "e2e", `${slug}.spec.ts`);
+  try {
+    await access(file);
+    throw new Error(`e2e/${slug}.spec.ts already exists. Choose another name.`);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("already exists")) throw error;
+  }
+  await mkdir(join(repo, "e2e"), { recursive: true });
+  const body = code
+    .replace(/from\s+(['"])@playwright\/test\1/g, 'from "playwright/test"')
+    .replace(new RegExp(`process\\.env\\.${userVar}`, "g"), "process.env.E2E_USERNAME!")
+    .replace(new RegExp(`process\\.env\\.${passwordVar}`, "g"), "process.env.E2E_PASSWORD!")
+    .replace(/test\((['"])test\1/, `test(${JSON.stringify(name)}`);
+  await writeFile(file, body);
+  return `e2e/${slug}.spec.ts`;
 }

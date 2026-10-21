@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, runnableCopy } from "../electron/e2e";
+import { assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, repoTests, runnableCopy, saveToRepo } from "../electron/e2e";
 
 const recording = `import { test, expect } from '@playwright/test';
 
@@ -110,5 +110,36 @@ describe("E2E settings in Workstream", () => {
     await expect(workflow.command({ type: "e2eRun", projectId: project.id })).rejects.toThrow(/Nothing answers at http:\/\/localhost:3000\/sv\//);
     expect(project.e2e?.reachable).toBe(false);
     expect(project.e2eActivity).toBeUndefined();
+  });
+});
+
+describe("the repository's own E2E suite", () => {
+  it("lists tests by file and line, and marks fixme tests as skipped", () => {
+    const report = {
+      suites: [{ specs: [
+        { title: "checkout", file: "checkout.spec.ts", line: 6, tests: [{ status: "expected", results: [{ status: "passed", duration: 50000, attachments: [] }] }] },
+        { title: "orders", file: "orders.spec.ts", line: 3, tests: [{ status: "skipped", annotations: [{ type: "fixme" }], results: [{ status: "skipped", duration: 5 }] }] },
+        { title: "listed only", file: "search.spec.ts", line: 1, tests: [{}] },
+      ] }],
+    };
+    const tests = repoTests(report, "t", (x) => x, "e2e/");
+    expect(tests.map((t) => [t.id, t.result?.status])).toEqual([
+      ["e2e/checkout.spec.ts:6", "passed"],
+      ["e2e/orders.spec.ts:3", "skipped"],
+      ["e2e/search.spec.ts:1", undefined],
+    ]);
+  });
+
+  it("saves a recording into e2e/ with the account from the environment", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "workstream-e2e-save-"));
+    const code = cleanRecording(recording, { username: "buyer@example.invalid", password: "S3cret.pass!" });
+    const path = await saveToRepo(repo, "Checkout with invoice", code);
+    expect(path).toBe("e2e/checkout-with-invoice.spec.ts");
+    const text = await readFile(join(repo, path), "utf8");
+    expect(text).toContain('from "playwright/test"');
+    expect(text).toContain(".fill(process.env.E2E_PASSWORD!)");
+    expect(text).toContain('test("Checkout with invoice"');
+    expect(text).not.toContain("S3cret");
+    await expect(saveToRepo(repo, "Checkout with invoice", code)).rejects.toThrow(/already exists/);
   });
 });
