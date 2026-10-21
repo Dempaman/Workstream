@@ -31,6 +31,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Waypoints,
   Square,
   Terminal,
   Workflow as WorkflowIcon,
@@ -100,6 +101,7 @@ import {
   initialSetup,
 } from "@/components/AgentSetup";
 import { SkillGenerator } from "@/components/SkillGenerator";
+import { E2ePage, TaskE2e } from "@/components/E2ePage";
 import {
   type Command,
   type Project,
@@ -124,6 +126,7 @@ type Page =
   | "connections"
   | "connectors"
   | "memory"
+  | "e2e"
   | "workflow";
 const stageLabels: Record<Stage, string> = {
   intake: "Ready to plan",
@@ -401,6 +404,13 @@ export default function App() {
             Agents & models
           </button>
           <button
+            className={cn("nav-item", page === "e2e" && "active")}
+            onClick={() => navigate("e2e")}
+          >
+            <Waypoints size={18} />
+            E2E tests
+          </button>
+          <button
             className={cn("nav-item", page === "connectors" && "active")}
             onClick={() => navigate("connectors")}
           >
@@ -489,6 +499,7 @@ export default function App() {
                     connections: "Git providers",
                     connectors: "Connectors",
                     memory: "Memory",
+                    e2e: "E2E tests",
                     workflow: "Workflow",
                   }[page]}
             </strong>
@@ -1027,6 +1038,8 @@ export default function App() {
             />
           ) : page === "memory" ? (
             <MemoryPage snapshot={snapshot} pending={pending} send={send} />
+          ) : page === "e2e" ? (
+            <E2ePage snapshot={snapshot} pending={pending} send={send} />
           ) : page === "connectors" ? (
             <ConnectorsPage snapshot={snapshot} pending={pending} send={send} />
           ) : page === "connections" ? (
@@ -2634,6 +2647,9 @@ function RunDetail({
             error={error}
           />
         )}
+      {run.prUrl && run.stage === "complete" && !running && (
+        <TaskE2e run={run} project={project} send={send} pending={pending} />
+      )}
       {run.prUrl &&
         !revision &&
         run.ticketKey &&

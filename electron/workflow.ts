@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
+import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, pruneRuns, record, runJourney, showTrace } from "./e2e";
 import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   activeRevision,
@@ -135,6 +137,9 @@ export class Workflow {
   private busy = new Set<string>();
   /** Skill generator sessions: thread id -> project id. */
   private skillThreads = new Map<string, string>();
+  /** The running recorder or test run per project, so Stop can end it. */
+  private e2eControllers = new Map<string, AbortController>();
+  private secrets: SecretVault;
   private cancellation = new Set<string>();
   private stopReasons = new Map<string, string>();
   constructor(
@@ -163,6 +168,8 @@ export class Workflow {
         ];
       }),
     ) as Record<Role, string>;
+    this.secrets = vault;
+    for (const project of store.state.projects) project.e2eActivity = undefined;
     for (const project of store.state.projects)
       if (project.skillDraft?.status === "working")
         Object.assign(project.skillDraft, { status: "failed", error: "Workstream closed while generating. Generate again." });
@@ -929,6 +936,91 @@ export class Workflow {
         const project = this.getProject(command.projectId);
         project.skillInfo = await readSkills(project.path, this.appSkills(project));
         project.skills = project.skillInfo.map((skill) => skill.path);
+        break;
+      }
+      case "e2eSettings": {
+        const project = this.getProject(command.projectId);
+        assertLocal(command.baseUrl);
+        if (command.password !== undefined) this.secrets.set(`e2e-password:${project.id}`, command.password ?? undefined);
+        project.e2e = {
+          ...project.e2e,
+          baseUrl: command.baseUrl,
+          browser: command.browser,
+          headed: command.headed,
+          username: command.username || undefined,
+          hasPassword: Boolean(this.secrets.get(`e2e-password:${project.id}`)),
+        };
+        break;
+      }
+      case "e2eStartSite": {
+        const project = this.getProject(command.projectId);
+        const settings = this.e2eSettings(project);
+        if (await this.siteReachable(project, settings)) break;
+        const dev = await detectDevCommand(project.path);
+        const logFile = join(tmpdir(), `workstream-e2e-site-${project.id.replace(/[^A-Za-z0-9_-]/g, "_")}.log`);
+        await launchDevServer(project.path, logFile, dev);
+        watchForUrl(logFile, () => void this.siteReachable(project, settings).then(() => this.emit()));
+        break;
+      }
+      case "e2eRecord": {
+        const project = this.getProject(command.projectId);
+        const settings = this.e2eSettings(project);
+        if (project.e2eActivity) throw new Error("Wait for the current recording or test run.");
+        if (command.journeyId) this.journey(project, command.journeyId);
+        void this.recordJourney(project, settings, command.name, command.journeyId);
+        break;
+      }
+      case "e2eRun": {
+        const project = this.getProject(command.projectId);
+        const settings = this.e2eSettings(project);
+        if (project.e2eActivity) throw new Error("Wait for the current recording or test run.");
+        const journeys = (project.journeys ?? []).filter((j) => !command.journeyIds || command.journeyIds.includes(j.id));
+        if (!journeys.length) throw new Error("Record a journey first.");
+        let run: Run | undefined;
+        if (command.runId) {
+          run = this.getRun(command.runId);
+          if (run.projectId !== project.id) throw new Error("This task belongs to another project.");
+          const current = await git(project.path, ["branch", "--show-current"]).catch(() => "");
+          run.repoCheckedOut = current === run.branch;
+          if (current !== run.branch)
+            throw new Error(`Your repository is on ${current || "a detached commit"}, not ${run.branch}. Click Check out in my repo first, then Start localhost.`);
+        }
+        if (!(await this.siteReachable(project, settings)))
+          throw new Error(`Nothing answers at ${settings.baseUrl}. Start the site first (Start localhost), then run the tests.`);
+        void this.runJourneys(project, settings, journeys.map((j) => j.id), run);
+        break;
+      }
+      case "e2eStop": {
+        this.getProject(command.projectId);
+        this.e2eControllers.get(command.projectId)?.abort();
+        break;
+      }
+      case "e2eRename": {
+        const project = this.getProject(command.projectId);
+        Object.assign(this.journey(project, command.journeyId), { name: command.name, updatedAt: new Date().toISOString() });
+        break;
+      }
+      case "e2eDelete": {
+        const project = this.getProject(command.projectId);
+        if (project.e2eActivity) throw new Error("Wait for the current recording or test run.");
+        const journey = this.journey(project, command.journeyId);
+        await rm(journeyFile(this.e2eFolder(project), journey.id), { force: true });
+        project.journeys = (project.journeys ?? []).filter((j) => j !== journey);
+        break;
+      }
+      case "e2eOpen": {
+        const project = this.getProject(command.projectId);
+        const journey = this.journey(project, command.journeyId);
+        const result = journey.lastResult;
+        if (command.what === "code") await this.openUrl(pathToFileURL(journeyFile(this.e2eFolder(project), journey.id)).href);
+        else if (command.what === "trace") {
+          if (!result?.trace) throw new Error("This run has no trace.");
+          await showTrace(project.path, result.trace);
+        } else {
+          const file = command.what === "folder" ? (result?.screenshot ?? result?.trace) : result?.[command.what];
+          if (!file) throw new Error(`This run has no ${command.what}.`);
+          await this.openUrl(pathToFileURL(command.what === "folder" ? dirname(file) : file).href);
+        }
         break;
       }
       case "generateSkills": {
@@ -2006,6 +2098,116 @@ export class Workflow {
         loginUrl: undefined,
       };
       await this.refreshAccount(provider, project).catch(() => {});
+      this.emit();
+    }
+  }
+  private e2eFolder(project: Project) {
+    return e2eDir(this.store.directory, project.id);
+  }
+  private e2eSettings(project: Project) {
+    if (!project.e2e) throw new Error("Set the test site address on the E2E tests page first.");
+    assertLocal(project.e2e.baseUrl);
+    return project.e2e;
+  }
+  private journey(project: Project, id: string) {
+    const journey = project.journeys?.find((j) => j.id === id);
+    if (!journey) throw new Error("Unknown journey.");
+    return journey;
+  }
+  private async siteReachable(project: Project, settings: NonNullable<Project["e2e"]>) {
+    let reachable = false;
+    try {
+      const response = await this.networkFetch(assertLocal(settings.baseUrl).href, { signal: AbortSignal.timeout(8000), redirect: "manual" });
+      reachable = response.status > 0 && response.status < 500;
+    } catch {
+      reachable = false;
+    }
+    if (project.e2e) Object.assign(project.e2e, { reachable, checkedAt: new Date().toISOString() });
+    return reachable;
+  }
+  /** Opens the recorder in your browser and saves what you did as a journey. */
+  private async recordJourney(project: Project, settings: NonNullable<Project["e2e"]>, name: string, journeyId?: string) {
+    const controller = new AbortController();
+    this.e2eControllers.set(project.id, controller);
+    project.e2eError = undefined;
+    project.e2eActivity = { kind: "recording", journeyId, startedAt: new Date().toISOString(), queue: [], output: [] };
+    this.emit();
+    try {
+      const password = this.secrets.get(`e2e-password:${project.id}`);
+      const raw = await record(project.path, this.e2eFolder(project), settings, settings.baseUrl, controller.signal);
+      const code = cleanRecording(raw, { username: settings.username, password });
+      if (containsSecret(code, password)) throw new Error("The recording still contains the password. It was not saved.");
+      const id = journeyId ?? randomUUID();
+      const file = journeyFile(this.e2eFolder(project), id);
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, code);
+      const now = new Date().toISOString();
+      const existing = project.journeys?.find((j) => j.id === id);
+      if (existing) Object.assign(existing, { name, updatedAt: now, lastResult: undefined });
+      else project.journeys = [...(project.journeys ?? []), { id, name, createdAt: now, updatedAt: now }];
+      project.e2eActivity = undefined;
+    } catch (error) {
+      project.e2eActivity = undefined;
+      this.e2eError(project, error);
+    } finally {
+      this.e2eControllers.delete(project.id);
+      this.emit();
+    }
+  }
+  private e2eError(project: Project, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    project.e2eError = message.slice(0, 1500);
+  }
+  /** Runs journeys one after another; with a task, records the results on it too. */
+  private async runJourneys(project: Project, settings: NonNullable<Project["e2e"]>, ids: string[], run?: Run) {
+    const controller = new AbortController();
+    this.e2eControllers.set(project.id, controller);
+    project.e2eError = undefined;
+    const activity: NonNullable<Project["e2eActivity"]> = { kind: "running", runId: run?.id, startedAt: new Date().toISOString(), queue: [...ids], output: [] };
+    project.e2eActivity = activity;
+    if (run) this.log(run, `Running ${ids.length} end-to-end ${ids.length === 1 ? "journey" : "journeys"} on ${settings.baseUrl}.`);
+    this.emit();
+    const password = this.secrets.get(`e2e-password:${project.id}`);
+    try {
+      for (const id of ids) {
+        if (controller.signal.aborted) break;
+        const journey = project.journeys?.find((j) => j.id === id);
+        if (!journey) continue;
+        activity.journeyId = id;
+        activity.current = journey.name;
+        activity.queue = activity.queue.filter((q) => q !== id);
+        activity.output = [];
+        this.emit();
+        let result;
+        try {
+          result = await runJourney({
+            repo: project.path,
+            dir: this.e2eFolder(project),
+            journeyId: id,
+            settings,
+            password,
+            signal: controller.signal,
+            onOutput: (line) => {
+              activity.output = [...activity.output, line].slice(-6);
+              this.emit();
+            },
+          });
+        } catch (error) {
+          if (controller.signal.aborted) break;
+          result = { status: "error" as const, startedAt: new Date().toISOString(), durationMs: 0, error: error instanceof Error ? error.message : String(error) };
+        }
+        if (run) {
+          result.branch = run.branch;
+          run.e2e = [...(run.e2e ?? []).filter((e) => e.journeyId !== id), { journeyId: id, name: journey.name, result }];
+          this.log(run, `End-to-end "${journey.name}": ${result.status}${result.error ? `. ${result.error.split("\n")[0]}` : ""}`.slice(0, 600), result.status === "passed" ? "success" : "error");
+        }
+        journey.lastResult = result;
+        this.emit();
+      }
+      await pruneRuns(this.e2eFolder(project)).catch(() => {});
+    } finally {
+      project.e2eActivity = undefined;
+      this.e2eControllers.delete(project.id);
       this.emit();
     }
   }

@@ -145,6 +145,51 @@ export interface GeneratedSkill {
   description: string;
   body: string;
 }
+/** Where end-to-end journeys run. Only local addresses are allowed (localhost is wired to the test backend). */
+export interface E2eSettings {
+  baseUrl: string;
+  /** Installed browser Playwright drives: Edge or Chrome, so nothing is downloaded. */
+  browser: "msedge" | "chrome";
+  /** Show the browser while tests run. */
+  headed: boolean;
+  /** Test account user name. The password is kept encrypted, outside state.json. */
+  username?: string;
+  hasPassword?: boolean;
+  /** Last reachability check of baseUrl. */
+  reachable?: boolean;
+  checkedAt?: string;
+}
+export interface E2eResult {
+  status: "passed" | "failed" | "error";
+  startedAt: string;
+  durationMs: number;
+  /** First lines of the failure, without secrets. */
+  error?: string;
+  screenshot?: string;
+  trace?: string;
+  video?: string;
+  /** The task branch the repository had checked out, when run from a task. */
+  branch?: string;
+}
+/** A recorded user flow, such as log in, add to cart and check out. */
+export interface Journey {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  lastResult?: E2eResult;
+}
+/** What the E2E page shows while recording or running. */
+export interface E2eActivity {
+  kind: "recording" | "running";
+  journeyId?: string;
+  runId?: string;
+  startedAt: string;
+  /** Journeys still to run, and the latest output line. */
+  queue: string[];
+  current?: string;
+  output: string[];
+}
 /** A draft from "Generate project skills": nothing is written until you save it. */
 export interface SkillDraft {
   status: "working" | "ready" | "failed";
@@ -230,6 +275,11 @@ export interface Project {
   agentSetup?: AgentSetup;
   /** The latest "Generate project skills" draft, until saved or discarded. */
   skillDraft?: SkillDraft;
+  e2e?: E2eSettings;
+  journeys?: Journey[];
+  e2eActivity?: E2eActivity;
+  /** The last recording or run error shown on the E2E page. */
+  e2eError?: string;
   id: string;
   name: string;
   path: string;
@@ -385,6 +435,8 @@ export function activeRevision(run: Pick<Run, "revisions">) {
   return last && !last.completedAt ? last : undefined;
 }
 export interface Run {
+  /** End-to-end journeys run for this task (Try it locally). */
+  e2e?: { journeyId: string; name: string; result: E2eResult }[];
   /** Your line comments from the Changes tab. */
   comments?: ReviewComment[];
   /** "Request changes" rounds after the pull request was created. */
@@ -595,6 +647,23 @@ export const commandSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("refreshSkills"), projectId: z.string() }),
   z.object({ type: z.literal("generateSkills"), projectId: z.string() }),
+  z.object({
+    type: z.literal("e2eSettings"),
+    projectId: z.string(),
+    baseUrl: z.string().trim().url().max(500),
+    browser: z.enum(["msedge", "chrome"]),
+    headed: z.boolean(),
+    username: z.string().trim().max(300).optional(),
+    /** Omit to keep the saved password; null removes it. */
+    password: z.string().min(1).max(500).nullable().optional(),
+  }),
+  z.object({ type: z.literal("e2eRecord"), projectId: z.string(), name: z.string().trim().min(1).max(120), journeyId: z.string().optional() }),
+  z.object({ type: z.literal("e2eRun"), projectId: z.string(), journeyIds: z.array(z.string()).max(50).optional(), runId: z.string().optional() }),
+  z.object({ type: z.literal("e2eStop"), projectId: z.string() }),
+  z.object({ type: z.literal("e2eDelete"), projectId: z.string(), journeyId: z.string() }),
+  z.object({ type: z.literal("e2eRename"), projectId: z.string(), journeyId: z.string(), name: z.string().trim().min(1).max(120) }),
+  z.object({ type: z.literal("e2eOpen"), projectId: z.string(), journeyId: z.string(), what: z.enum(["code", "screenshot", "trace", "video", "folder"]) }),
+  z.object({ type: z.literal("e2eStartSite"), projectId: z.string() }),
   z.object({ type: z.literal("cancelSkillGeneration"), projectId: z.string() }),
   z.object({ type: z.literal("discardSkillDraft"), projectId: z.string() }),
   z.object({
