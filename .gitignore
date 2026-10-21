@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.workstream/
+test-results/
+*.log
+build/copilot-runtime/
+coverage/
+*.tsbuildinfo
+smoketmp/
+.env*
