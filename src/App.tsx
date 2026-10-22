@@ -31,7 +31,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
-  Waypoints,
+  FlaskConical,
   Square,
   Terminal,
   Workflow as WorkflowIcon,
@@ -407,8 +407,8 @@ export default function App() {
             className={cn("nav-item", page === "e2e" && "active")}
             onClick={() => navigate("e2e")}
           >
-            <Waypoints size={18} />
-            E2E tests
+            <FlaskConical size={18} />
+            Tests
           </button>
           <button
             className={cn("nav-item", page === "connectors" && "active")}
@@ -499,7 +499,7 @@ export default function App() {
                     connections: "Git providers",
                     connectors: "Connectors",
                     memory: "Memory",
-                    e2e: "E2E tests",
+                    e2e: "Tests",
                     workflow: "Workflow",
                   }[page]}
             </strong>

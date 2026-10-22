@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
 import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, probeSite, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, scanTests, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
+import { Sites } from "./site";
+import { listUnitFiles, runUnitTests, unitRunner } from "./unittests";
 import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
 import { dirname, join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -140,6 +142,16 @@ export class Workflow {
   /** The running recorder or test run per project, so Stop can end it. */
   private e2eControllers = new Map<string, AbortController>();
   private secrets: SecretVault;
+  private siteNotify?: ReturnType<typeof setTimeout>;
+  /** Dev servers started from the Tests page. Their status is shown, not saved. */
+  private sites = new Sites(() => {
+    // Log lines arrive often: refresh the window at most every 300 ms, without saving state.
+    if (this.siteNotify) return;
+    this.siteNotify = setTimeout(() => {
+      this.siteNotify = undefined;
+      this.notify(this.snapshot());
+    }, 300);
+  });
   private cancellation = new Set<string>();
   private stopReasons = new Map<string, string>();
   constructor(
@@ -307,6 +319,10 @@ export class Workflow {
   snapshot(): Snapshot {
     return {
       ...this.store.state,
+      projects: this.store.state.projects.map((project) => {
+        const site = this.sites.states.get(project.id);
+        return site ? { ...project, site: { ...site, log: site.log.slice(-60) } } : project;
+      }),
       runtime: this.codex.runtime,
       claude: { ...this.claude.runtime, hasKey: this.claude.hasKey },
       copilot: this.copilot.runtime,
@@ -957,11 +973,37 @@ export class Workflow {
       case "e2eStartSite": {
         const project = this.getProject(command.projectId);
         const settings = this.e2eSettings(project);
-        if (await this.siteReachable(project, settings)) break;
-        const dev = await detectDevCommand(project.path);
-        const logFile = join(tmpdir(), `workstream-e2e-site-${project.id.replace(/[^A-Za-z0-9_-]/g, "_")}.log`);
-        await launchDevServer(project.path, logFile, dev);
-        watchForUrl(logFile, () => void this.siteReachable(project, settings).then(() => this.emit()));
+        project.e2eError = undefined;
+        if (await this.siteReachable(project, settings)) {
+          project.e2eNotice = `The site already answers at ${settings.baseUrl}.`;
+          break;
+        }
+        await detectDevCommand(project.path);
+        void this.sites
+          .start(project.id, project.path, settings.baseUrl)
+          .catch((error: unknown) => {
+            project.e2eError = error instanceof Error ? error.message : String(error);
+          })
+          .finally(() => void this.siteReachable(project, settings).then(() => this.emit()));
+        break;
+      }
+      case "e2eStopSite": {
+        const project = this.getProject(command.projectId);
+        this.sites.stop(project.id);
+        if (project.e2e) setTimeout(() => void this.siteReachable(project, project.e2e!).then(() => this.emit()), 1500);
+        break;
+      }
+      case "unitList": {
+        const project = this.getProject(command.projectId);
+        project.unitRunner = (await unitRunner(project.path))?.id;
+        const previous = new Map((project.unitTests ?? []).map((u) => [u.file, u.result]));
+        project.unitTests = (await listUnitFiles(project.path)).map((file) => ({ file, ...(previous.get(file) ? { result: previous.get(file) } : {}) }));
+        break;
+      }
+      case "unitRun": {
+        const project = this.getProject(command.projectId);
+        if (project.e2eActivity) throw new Error("Wait for the current test run.");
+        void this.runUnit(project, command.files);
         break;
       }
       case "e2eRecord": {
@@ -2139,6 +2181,46 @@ export class Workflow {
       this.emit();
     }
   }
+  /** Runs the project's unit tests (Vitest or Jest) and records per-file results. */
+  private async runUnit(project: Project, files?: string[]) {
+    const controller = new AbortController();
+    this.e2eControllers.set(project.id, controller);
+    project.e2eError = undefined;
+    project.e2eNotice = undefined;
+    const activity: NonNullable<Project["e2eActivity"]> = {
+      kind: "running",
+      suite: "unit",
+      journeyId: files?.length === 1 ? files[0] : undefined,
+      startedAt: new Date().toISOString(),
+      queue: [],
+      current: files?.length === 1 ? files[0] : "all unit tests",
+      output: [],
+    };
+    project.e2eActivity = activity;
+    this.emit();
+    try {
+      const outcome = await runUnitTests({
+        repo: project.path,
+        dir: this.e2eFolder(project),
+        files,
+        signal: controller.signal,
+        onOutput: (line) => {
+          activity.output = [...activity.output, line].slice(-6);
+          this.notify(this.snapshot());
+        },
+      });
+      project.unitRunner = outcome.runner;
+      const byFile = new Map((project.unitTests ?? []).map((u) => [u.file, u]));
+      for (const file of outcome.files) byFile.set(file.file, file);
+      project.unitTests = [...byFile.values()].sort((a, b) => a.file.localeCompare(b.file));
+    } catch (error) {
+      if (!controller.signal.aborted) project.e2eError = error instanceof Error ? error.message.slice(0, 1500) : String(error);
+    } finally {
+      project.e2eActivity = undefined;
+      this.e2eControllers.delete(project.id);
+      this.emit();
+    }
+  }
   /** Whether this project runs the repository's own Playwright suite. */
   private repoMode(project: Project) {
     return (project.e2e?.source ?? (project.e2eConfig ? "repository" : "workstream")) === "repository" && Boolean(project.e2eConfig);
@@ -2548,6 +2630,7 @@ export class Workflow {
     return this.store.state.settings.claudePath ?? "claude";
   }
   close() {
+    this.sites.stopAll();
     try {
       this.memory?.close();
     } catch {

@@ -174,6 +174,29 @@ export interface E2eResult {
   /** The task branch the repository had checked out, when run from a task. */
   branch?: string;
 }
+/** Result of one unit test file (Vitest or Jest). */
+export interface UnitResult {
+  status: "passed" | "failed" | "skipped";
+  startedAt: string;
+  durationMs: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  failures: { title: string; message: string }[];
+}
+export interface UnitFile {
+  /** Repository-relative path. */
+  file: string;
+  result?: UnitResult;
+}
+/** A dev server Workstream started for the Tests page. */
+export interface SiteStatus {
+  status: "starting" | "running" | "stopped" | "failed";
+  startedAt: string;
+  command: string;
+  log: string[];
+  error?: string;
+}
 /** A test in the repository's own E2E suite. */
 export interface RepoTest {
   /** file:line, which Playwright also accepts to run just this test. */
@@ -194,6 +217,8 @@ export interface Journey {
 /** What the E2E page shows while recording or running. */
 export interface E2eActivity {
   kind: "recording" | "running";
+  /** Which tests are running: end-to-end (default) or unit tests. */
+  suite?: "e2e" | "unit";
   journeyId?: string;
   runId?: string;
   startedAt: string;
@@ -294,6 +319,10 @@ export interface Project {
   e2eError?: string;
   /** The repository's playwright.config file, when it has its own E2E suite. */
   e2eConfig?: string;
+  unitTests?: UnitFile[];
+  unitRunner?: "vitest" | "jest";
+  /** The dev server Workstream started for this project (not saved). */
+  site?: SiteStatus;
   /** Kinds of tests found in the repository (Playwright, Vitest, Storybook...). */
   testScan?: { id: "playwright" | "vitest" | "jest" | "cypress" | "storybook"; label: string; files: number; runnable: boolean; note: string }[];
   /** A short success message on the E2E page, such as where a recording was saved. */
@@ -682,6 +711,9 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("e2eStop"), projectId: z.string() }),
   z.object({ type: z.literal("e2eListRepo"), projectId: z.string() }),
   z.object({ type: z.literal("e2eCheckSite"), projectId: z.string() }),
+  z.object({ type: z.literal("e2eStopSite"), projectId: z.string() }),
+  z.object({ type: z.literal("unitList"), projectId: z.string() }),
+  z.object({ type: z.literal("unitRun"), projectId: z.string(), files: z.array(z.string().max(500)).max(200).optional() }),
   z.object({ type: z.literal("e2eDelete"), projectId: z.string(), journeyId: z.string() }),
   z.object({ type: z.literal("e2eRename"), projectId: z.string(), journeyId: z.string(), name: z.string().trim().min(1).max(120) }),
   z.object({ type: z.literal("e2eOpen"), projectId: z.string(), journeyId: z.string(), what: z.enum(["code", "screenshot", "trace", "video", "folder"]) }),

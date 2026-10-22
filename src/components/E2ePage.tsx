@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { TechIcon } from "@/components/TechStack";
 import { bridge } from "@/lib/bridge";
 import { cn } from "@/lib/utils";
-import type { Command, E2eResult, Project, Run, Snapshot } from "../../shared/types";
+import type { Command, E2eResult, Project, Run, Snapshot, UnitFile } from "../../shared/types";
 
 type Send = (command: Command) => Promise<Snapshot | null>;
 
@@ -32,7 +32,8 @@ const ago = (iso: string) => {
   const minutes = Math.round((Date.now() - Date.parse(iso)) / 60000);
   return minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : new Date(iso).toLocaleDateString();
 };
-const seconds = (ms: number) => (ms < 60000 ? `${Math.round(ms / 1000)} s` : `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s`);
+const seconds = (ms: number) =>
+  ms < 1000 ? `${ms} ms` : ms < 60000 ? `${Math.round(ms / 1000)} s` : `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s`;
 
 const pillText = { passed: "Passed", failed: "Failed", error: "Could not run", skipped: "Skipped (not recorded yet)" };
 export function ResultPill({ result }: { result?: E2eResult }) {
@@ -196,7 +197,7 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
   return (
     <section className="panel e2e-settings">
       <h2>
-        <Globe size={16} /> Test site
+        <Globe size={16} /> Site and test account
       </h2>
       {project.e2eConfig && (
         <fieldset className="skill-location e2e-source">
@@ -266,26 +267,63 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
             Remove password
           </Button>
         )}
-        {e2e && (
-          <>
-            <SiteWatcher project={project} />
-            <span className={cn("e2e-site", e2e.reachable ? "up" : e2e.reachable === false ? "down" : "")}>
-              <Circle size={9} fill="currentColor" />
-              {e2e.reachable ? "Site is running" : e2e.reachable === false ? "Site is not running" : "Not checked"}
-            </span>
-            <Button variant="outline" size="sm" disabled={pending} onClick={() => void send({ type: "e2eStartSite", projectId: project.id })}>
-              {e2e.reachable ? "Check again" : "Start site"}
-            </Button>
-          </>
-        )}
       </div>
-      {e2e && !e2e.reachable && repoMode(project) && (
-        <p className="muted-note">
-          No need to start it first: when you press Run, the repository's Playwright config starts npm run start
-          itself and stops it afterwards. Start site keeps it running in a window of its own instead.
+      {e2e && <SitePanel project={project} send={send} pending={pending} />}
+    </section>
+  );
+}
+
+/** The local site: whether it answers, and the dev server Workstream started (with its log). */
+function SitePanel({ project, send, pending }: { project: Project; send: Send; pending: boolean }) {
+  const e2e = project.e2e!;
+  const site = project.site;
+  const ours = site && (site.status === "starting" || site.status === "running");
+  const state = site?.status === "starting" ? "starting" : e2e.reachable ? "up" : "down";
+  return (
+    <div className={cn("site-panel", state)}>
+      <SiteWatcher project={project} />
+      <div className="site-row">
+        <span className={cn("e2e-site", state)}>
+          {state === "starting" ? <LoaderCircle size={13} className="spin" /> : <Circle size={9} fill="currentColor" />}
+          {state === "starting"
+            ? `Starting the site (${site!.command})…`
+            : e2e.reachable
+              ? ours
+                ? `Site is running (started by Workstream: ${site!.command})`
+                : "Site is running"
+              : "Site is not running"}
+        </span>
+        {ours ? (
+          <Button variant="outline" size="sm" disabled={pending} onClick={() => void send({ type: "e2eStopSite", projectId: project.id })}>
+            <Square size={12} /> Stop site
+          </Button>
+        ) : !e2e.reachable ? (
+          <Button variant="outline" size="sm" disabled={pending} onClick={() => void send({ type: "e2eStartSite", projectId: project.id })}>
+            <Play size={12} /> Start site
+          </Button>
+        ) : null}
+        <a className="site-link" href={e2e.baseUrl} target="_blank" rel="noreferrer">
+          {e2e.baseUrl}
+        </a>
+      </div>
+      {site?.status === "failed" && site.error && (
+        <p className="inline-error">
+          <AlertTriangle size={14} /> {site.error}
         </p>
       )}
-    </section>
+      {!!site?.log.length && (
+        <details className="site-log" open={site.status === "failed"}>
+          <summary>Dev server output</summary>
+          <pre>{site.log.join("\n")}</pre>
+        </details>
+      )}
+      {!e2e.reachable && !ours && repoMode(project) && (
+        <p className="muted-note">
+          You do not have to start it: Run starts npm run start for the tests and stops it afterwards. Start site keeps it
+          running in the background (no terminal window) until you press Stop site or close Workstream.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -310,7 +348,86 @@ function ListOnOpen({ project }: { project: Project }) {
   return null;
 }
 
-/** The E2E tests page: test site, recorded journeys and their results. */
+function UnitRow({ project, file, send, pending, busy }: { project: Project; file: UnitFile; send: Send; pending: boolean; busy: boolean }) {
+  const result = file.result;
+  const running = project.e2eActivity?.suite === "unit" && (project.e2eActivity.journeyId === file.file || !project.e2eActivity.journeyId);
+  return (
+    <li className={cn("unit-row", result?.status, running && "running")}>
+      <div className="unit-head">
+        <code>{file.file}</code>
+        {running ? (
+          <span className="e2e-pill running"><LoaderCircle size={13} className="spin" /> Running</span>
+        ) : result ? (
+          <span className={cn("e2e-pill", result.status)}>
+            {result.status === "passed" ? <CheckCircle2 size={13} /> : result.status === "failed" ? <XCircle size={13} /> : <MinusCircle size={13} />}
+            {result.failed ? `${result.failed} failed` : result.status === "skipped" ? "Skipped" : "Passed"}
+            {result.passed ? ` · ${result.passed} passed` : ""}
+          </span>
+        ) : (
+          <span className="e2e-pill none">Not run yet</span>
+        )}
+        {result && <small>{ago(result.startedAt)}{result.durationMs ? ` · ${seconds(result.durationMs)}` : ""}</small>}
+        <Button size="sm" variant="outline" disabled={pending || busy} onClick={() => void send({ type: "unitRun", projectId: project.id, files: [file.file] })}>
+          <Play size={12} /> Run
+        </Button>
+      </div>
+      {!!result?.failures.length && (
+        <ul className="unit-failures">
+          {result.failures.map((f, i) => (
+            <li key={i}>
+              <strong>{f.title}</strong>
+              {f.message && <pre className="journey-error">{f.message}</pre>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/** Unit tests (Vitest or Jest) from the repository. */
+function UnitTests({ project, send, pending }: { project: Project; send: Send; pending: boolean }) {
+  useEffect(() => {
+    void bridge.command({ type: "unitList", projectId: project.id }).catch(() => {});
+  }, [project.id]);
+  const files = project.unitTests ?? [];
+  if (!files.length) return null;
+  const busy = Boolean(project.e2eActivity);
+  const runner = project.unitRunner === "jest" ? "Jest" : "Vitest";
+  const done = files.filter((f) => f.result);
+  const failed = done.filter((f) => f.result?.status === "failed").length;
+  return (
+    <section className="panel e2e-journeys" id="unit-tests">
+      <div className="e2e-journeys-head">
+        <div>
+          <h2>
+            <TechIcon id={project.unitRunner === "jest" ? "jest" : "vite"} size={18} /> Unit tests
+          </h2>
+          <small className="e2e-sub">
+            {files.length} {runner} test {files.length === 1 ? "file" : "files"}
+            {done.length ? ` · last run: ${failed ? `${failed} failing` : "all passing"}` : ""}. The same tests the task checks run.
+          </small>
+        </div>
+        <div className="button-row">
+          <Button variant="outline" disabled={pending || busy} onClick={() => void send({ type: "unitList", projectId: project.id })}>
+            <ScanSearch size={14} /> Scan again
+          </Button>
+          <Button disabled={pending || busy} onClick={() => void send({ type: "unitRun", projectId: project.id })}>
+            {project.e2eActivity?.suite === "unit" && !project.e2eActivity.journeyId ? <LoaderCircle size={14} className="spin" /> : <Play size={14} />} Run all
+          </Button>
+        </div>
+      </div>
+      {project.e2eActivity?.suite === "unit" && <Activity project={project} send={send} pending={pending} />}
+      <ul className="unit-list">
+        {files.map((file) => (
+          <UnitRow key={file.file} project={project} file={file} send={send} pending={pending} busy={busy} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** The Tests page: the local site, end-to-end tests and unit tests with their results. */
 export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pending: boolean; send: Send }) {
   const projects = snapshot.projects.filter((p) => !p.archived);
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
@@ -334,14 +451,15 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
     <>
       <div className="page-heading">
         <div>
-          <div className="eyebrow">CHECK THE WHOLE SITE STILL WORKS</div>
-          <h1>E2E tests</h1>
+          <div className="eyebrow">CHECK NOTHING BROKE</div>
+          <h1>Tests</h1>
           <p>
-            Record a user journey once, such as logging in, buying a product and completing the order. Workstream replays it
-            with Playwright in your browser whenever you want, and after a task is checked out, so you know nothing broke.
+            Every kind of test in the project in one place: end-to-end journeys that click through the real site (like
+            logging in and placing an order) and the unit tests. Run them whenever you want, and after a task is checked
+            out.{" "}
             {repo
-              ? ` This project has its own suite (${project.e2eConfig}): Workstream runs those tests, the same ones you run in VS Code.`
-              : " The tests live in Workstream, not in the repository."}
+              ? `End-to-end tests come from the repository's own Playwright suite (${project.e2eConfig}), the same ones you run in VS Code.`
+              : "End-to-end journeys you record here are kept in Workstream, not in the repository."}
           </p>
         </div>
         <label className="e2e-project">
@@ -355,17 +473,33 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </select>
         </label>
       </div>
+      {!!project.testScan?.length && (
+          <div className="test-scan overview">
+            <span className="muted-note">In {project.name}:</span>
+            {project.testScan.map((kind) => (
+              <a
+                key={kind.id}
+                href={kind.id === "playwright" ? "#e2e-tests" : kind.id === "vitest" || kind.id === "jest" ? "#unit-tests" : undefined}
+                className={cn("scan-chip", (kind.runnable || kind.id === "vitest" || kind.id === "jest") && "runnable")}
+                title={kind.id === "storybook" || kind.id === "cypress" ? "Shown for information" : "Run them below"}
+              >
+                <TechIcon id={kind.id === "vitest" ? "vite" : kind.id} size={14} />
+                <strong>{kind.files}</strong> {kind.label} {kind.note.replace(", run by the task checks", "")}
+              </a>
+            ))}
+          </div>
+        )}
       <Settings key={project.id} project={project} send={send} pending={pending} />
-      <section className="panel e2e-journeys">
+      <section className="panel e2e-journeys" id="e2e-tests">
         <div className="e2e-journeys-head">
           <div>
             <h2>
               {repo ? <TechIcon id="playwright" size={18} /> : <Waypoints size={16} />}{" "}
-              {repo ? "Playwright tests in the repository" : "Journeys"}
+              {repo ? "End-to-end tests" : "End-to-end journeys"}
             </h2>
             {repo && (
               <small className="e2e-sub">
-                Found by Playwright in {project.e2eConfig}: {items.length} {items.length === 1 ? "test" : "tests"}
+                {items.length} Playwright {items.length === 1 ? "test" : "tests"} in {project.e2eConfig}. They click through the real site.
               </small>
             )}
           </div>
@@ -383,23 +517,12 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
             )}
           </div>
         </div>
-        {!!project.testScan?.length && (
-          <div className="test-scan">
-            <span className="muted-note">Tests in {project.name}:</span>
-            {project.testScan.map((kind) => (
-              <span key={kind.id} className={cn("scan-chip", kind.runnable && "runnable")} title={kind.runnable ? "Workstream runs these" : "Shown for information"}>
-                <TechIcon id={kind.id === "vitest" ? "vite" : kind.id} size={14} />
-                <strong>{kind.files}</strong> {kind.label} {kind.note}
-              </span>
-            ))}
-          </div>
-        )}
         {project.e2eError && (
           <p className="inline-error">
             <AlertTriangle size={14} /> {project.e2eError}
           </p>
         )}
-        <Activity project={project} send={send} pending={pending} />
+        {project.e2eActivity?.suite !== "unit" && <Activity project={project} send={send} pending={pending} />}
         {project.e2eNotice && (
           <p className="e2e-notice">
             <CheckCircle2 size={14} /> {project.e2eNotice}
@@ -445,6 +568,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </ol>
         </details>
       </section>
+      <UnitTests project={project} send={send} pending={pending} />
     </>
   );
 }

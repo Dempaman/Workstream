@@ -5527,3 +5527,113 @@ ul.tech-stack.tech-stack {
   border-color: light-dark(#86cfa6, #2f6b4c);
   background: light-dark(#f1faf5, #13261f);
 }
+.test-scan.overview {
+  margin-bottom: 16px;
+}
+a.scan-chip {
+  text-decoration: none;
+  cursor: pointer;
+}
+a.scan-chip:hover {
+  border-color: light-dark(#476be3, #8ea6f5);
+}
+.site-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid light-dark(#d9dfe8, #2c394d);
+  background: light-dark(#f7f9fc, #131c2a);
+}
+.site-panel.up {
+  border-color: light-dark(#a7dcbf, #24533b);
+}
+.site-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.site-row .e2e-site {
+  margin-left: 0;
+}
+.e2e-site.starting {
+  color: light-dark(#2f4fc0, #a9bcf8);
+}
+.site-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: light-dark(#4a5565, #9aa8bd);
+}
+.site-log summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.site-log pre {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 10px;
+  border-radius: 8px;
+  background: light-dark(#eef1f5, #0d141f);
+  color: light-dark(#36404c, #c3cede);
+}
+.unit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.unit-row {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid light-dark(#d9dfe8, #2c394d);
+  border-left: 4px solid light-dark(#cbd3de, #3a4a63);
+  background: light-dark(white, #131c2a);
+}
+.unit-row.passed {
+  border-left-color: #16a34a;
+}
+.unit-row.failed {
+  border-left-color: #dc2626;
+}
+.unit-row.skipped {
+  border-left-color: #d97706;
+}
+.unit-row.running {
+  border-left-color: #476be3;
+}
+.unit-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.unit-head code {
+  flex: 1;
+  min-width: 220px;
+  font-size: 12.5px;
+}
+.unit-head small {
+  font-size: 12px;
+  color: light-dark(#4a5565, #9aa8bd);
+}
+.unit-failures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.unit-failures strong {
+  display: block;
+  margin-bottom: 4px;
+}
