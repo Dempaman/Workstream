@@ -5637,3 +5637,85 @@ a.scan-chip:hover {
   display: block;
   margin-bottom: 4px;
 }
+.site-bar {
+  padding: 0;
+  margin-bottom: 20px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.site-bar .site-panel {
+  background: light-dark(white, #172131);
+}
+.e2e-options {
+  position: relative;
+}
+.e2e-options > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid light-dark(#d6dce5, #2c394d);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.e2e-options > summary::-webkit-details-marker {
+  display: none;
+}
+.e2e-options[open] > summary {
+  border-color: #476be3;
+}
+.e2e-options-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  width: 300px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid light-dark(#d6dce5, #2c394d);
+  background: light-dark(white, #172131);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.25);
+}
+.e2e-options-body label {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.e2e-options-body label.e2e-check {
+  display: flex;
+  font-weight: 400;
+}
+.e2e-options-body select,
+.e2e-options-body input:not([type="checkbox"]) {
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid light-dark(#d6dce5, #2c394d);
+  background: light-dark(white, #101722);
+  color: inherit;
+  font: inherit;
+  font-weight: 400;
+  font-size: 12.5px;
+  padding: 0 8px;
+}
+.e2e-options-body small {
+  font-weight: 400;
+  font-size: 11.5px;
+  color: light-dark(#4a5565, #9aa8bd);
+}
+.e2e-options-body small.bad {
+  color: light-dark(#b91c1c, #fca5a5);
+}
+.inline-error.warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: light-dark(#8a5a00, #f2c15e);
+}

@@ -332,7 +332,8 @@ export async function runRepoSuite(options: {
     timeout: options.list ? 2 * 60_000 : 60 * 60_000,
     env: {
       ...nodeEnv,
-      E2E_BASE_URL: settings.baseUrl,
+      // The suite's own config decides the address unless you set one in Workstream.
+      ...(settings.customUrl ? { E2E_BASE_URL: settings.baseUrl } : {}),
       E2E_BROWSER: settings.browser,
       ...(settings.username ? { E2E_USERNAME: settings.username } : {}),
       ...(password ? { E2E_PASSWORD: password } : {}),
@@ -449,4 +450,32 @@ export async function scanTests(repo: string, playwrightTests: number): Promise<
   if (counts.stories)
     scan.push({ id: "storybook", label: "Storybook", files: counts.stories, runnable: false, note: counts.stories === 1 ? "story file" : "story files" });
   return scan;
+}
+
+/**
+ * Whether the repository's local settings provide the test account, without
+ * reading out the values: E2E_USERNAME and E2E_PASSWORD in .env.local (or .env).
+ */
+export async function accountInEnv(repo: string) {
+  const values = await accountValues(repo);
+  return { username: Boolean(values.username), password: Boolean(values.password), file: ".env.local" };
+}
+
+/**
+ * The test account values from .env.local (or .env). Only used inside the main
+ * process to strip them from recordings; never stored, logged or sent anywhere.
+ */
+export async function accountValues(repo: string) {
+  const found: { username?: string; password?: string } = {};
+  for (const name of [".env.local", ".env"]) {
+    const text = await readFile(join(repo, name), "utf8").catch(() => "");
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^\s*(?:export\s+)?(E2E_USERNAME|E2E_PASSWORD)\s*=\s*(.*)$/);
+      const value = match?.[2].trim().replace(/^["']|["']$/g, "");
+      if (!match || !value) continue;
+      if (match[1] === "E2E_USERNAME") found.username ??= value;
+      else found.password ??= value;
+    }
+  }
+  return found;
 }

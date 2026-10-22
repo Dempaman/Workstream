@@ -5,7 +5,6 @@ import {
   Circle,
   CircleDot,
   Code2,
-  FolderGit2,
   MinusCircle,
   Film,
   Globe,
@@ -13,6 +12,7 @@ import {
   LoaderCircle,
   Play,
   RotateCcw,
+  SlidersHorizontal,
   ScanSearch,
   Square,
   Trash2,
@@ -46,8 +46,7 @@ export function ResultPill({ result }: { result?: E2eResult }) {
   );
 }
 /** Whether the project runs the repository's own suite. */
-export const repoMode = (project: Project) =>
-  Boolean(project.e2eConfig) && (project.e2e?.source ?? "repository") === "repository";
+export const repoMode = (project: Project) => Boolean(project.e2eConfig);
 interface Item {
   id: string;
   name: string;
@@ -188,10 +187,9 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
   const [headed, setHeaded] = useState(e2e?.headed ?? true);
   const [username, setUsername] = useState(e2e?.username ?? "");
   const [password, setPassword] = useState("");
-  const [source, setSource] = useState<"repository" | "workstream">(e2e?.source ?? (project.e2eConfig ? "repository" : "workstream"));
   const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(baseUrl.trim());
   const save = async (extra: Partial<Extract<Command, { type: "e2eSettings" }>> = {}) => {
-    if (await send({ type: "e2eSettings", projectId: project.id, baseUrl: baseUrl.trim(), browser, headed, source, username: username.trim(), ...(password ? { password } : {}), ...extra }))
+    if (await send({ type: "e2eSettings", projectId: project.id, baseUrl: baseUrl.trim(), customUrl: true, browser, headed, username: username.trim(), ...(password ? { password } : {}), ...extra }))
       setPassword("");
   };
   return (
@@ -199,29 +197,6 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
       <h2>
         <Globe size={16} /> Site and test account
       </h2>
-      {project.e2eConfig && (
-        <fieldset className="skill-location e2e-source">
-          <legend>Which tests</legend>
-          <label className={cn(source === "repository" && "on")}>
-            <input type="radio" name={`e2e-source-${project.id}`} checked={source === "repository"} onChange={() => setSource("repository")} />
-            <FolderGit2 size={16} />
-            <span>
-              <strong>The repository's tests</strong>
-              <small>
-                The Playwright suite in {project.name} ({project.e2eConfig}, npm run test:e2e). The same tests you run in VS Code.
-              </small>
-            </span>
-          </label>
-          <label className={cn(source === "workstream" && "on")}>
-            <input type="radio" name={`e2e-source-${project.id}`} checked={source === "workstream"} onChange={() => setSource("workstream")} />
-            <Waypoints size={16} />
-            <span>
-              <strong>Journeys kept in Workstream</strong>
-              <small>Recorded here and stored only in Workstream, outside the repository.</small>
-            </span>
-          </label>
-        </fieldset>
-      )}
       <div className="e2e-fields">
         <label>
           Address
@@ -255,8 +230,7 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
       </label>
       <p className="muted-note">
         The password is encrypted with Windows credential protection. Only the test run gets it, through an environment
-        variable{project.e2eConfig ? " (E2E_USERNAME and E2E_PASSWORD, which win over .env.local)" : ""}. Agents never see it,
-        and recordings never contain it.
+        variable. Agents never see it, and recordings never contain it.
       </p>
       <div className="button-row">
         <Button disabled={pending || !local} onClick={() => void save()}>
@@ -319,11 +293,77 @@ function SitePanel({ project, send, pending }: { project: Project; send: Send; p
       )}
       {!e2e.reachable && !ours && repoMode(project) && (
         <p className="muted-note">
-          You do not have to start it: Run starts npm run start for the tests and stops it afterwards. Start site keeps it
-          running in the background (no terminal window) until you press Stop site or close Workstream.
+          You do not have to start it before running tests: Run starts it for the tests and stops it afterwards. Start site
+          keeps it running in the background until you press Stop site or close Workstream.
         </p>
       )}
     </div>
+  );
+}
+
+/** Browser, visible browser and (rarely) another address, for the repository's tests. */
+function RunOptions({ project, send, pending }: { project: Project; send: Send; pending: boolean }) {
+  const e2e = project.e2e;
+  const [browser, setBrowser] = useState<"msedge" | "chrome">(e2e?.browser ?? "msedge");
+  const [headed, setHeaded] = useState(e2e?.headed ?? true);
+  const [url, setUrl] = useState(e2e?.customUrl ? e2e.baseUrl : "");
+  if (!e2e) return null;
+  const local = !url.trim() || /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(url.trim());
+  return (
+    <details className="e2e-options">
+      <summary>
+        <SlidersHorizontal size={14} /> Options
+      </summary>
+      <div className="e2e-options-body">
+        <label>
+          Browser
+          <select value={browser} onChange={(e) => setBrowser(e.target.value as "msedge" | "chrome")}>
+            <option value="msedge">Microsoft Edge</option>
+            <option value="chrome">Google Chrome</option>
+          </select>
+        </label>
+        <label className="e2e-check">
+          <input type="checkbox" checked={headed} onChange={(e) => setHeaded(e.target.checked)} /> Show the browser while tests run
+        </label>
+        <label>
+          Address
+          <input value={url} placeholder={`From ${project.e2eConfig}`} onChange={(e) => setUrl(e.target.value)} />
+          <small className={cn(!local && "bad")}>
+            {local ? "Leave empty to use the address in the Playwright config. Only localhost is allowed." : "Only localhost is allowed."}
+          </small>
+        </label>
+        <Button
+          size="sm"
+          disabled={pending || !local}
+          onClick={() =>
+            void send({
+              type: "e2eSettings",
+              projectId: project.id,
+              baseUrl: url.trim() || e2e.baseUrl,
+              customUrl: Boolean(url.trim()),
+              browser,
+              headed,
+            })
+          }
+        >
+          Save options
+        </Button>
+      </div>
+    </details>
+  );
+}
+
+/** Says whether .env.local has the test account the end-to-end tests log in with. */
+function AccountCheck({ project }: { project: Project }) {
+  const account = project.e2eAccount;
+  if (!account || (account.username && account.password)) return null;
+  const missing = [!account.username && "E2E_USERNAME", !account.password && "E2E_PASSWORD"].filter(Boolean).join(" and ");
+  return (
+    <p className="inline-error warn">
+      <AlertTriangle size={14} /> The tests log in with a test account, but {missing} {missing.includes(" and ") ? "are" : "is"} not set
+      in {account.file} in {project.name}. Add {missing.includes(" and ") ? "them" : "it"} there (Git ignores that file), then press
+      Scan again.
+    </p>
   );
 }
 
@@ -489,7 +529,15 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
             ))}
           </div>
         )}
-      <Settings key={project.id} project={project} send={send} pending={pending} />
+      {repo ? (
+        project.e2e && (
+          <section className="panel site-bar">
+            <SitePanel project={project} send={send} pending={pending} />
+          </section>
+        )
+      ) : (
+        <Settings key={project.id} project={project} send={send} pending={pending} />
+      )}
       <section className="panel e2e-journeys" id="e2e-tests">
         <div className="e2e-journeys-head">
           <div>
@@ -505,6 +553,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </div>
           <ListOnOpen project={project} />
           <div className="button-row">
+            {repo && <RunOptions key={project.id} project={project} send={send} pending={pending} />}
             {repo && (
               <Button variant="outline" disabled={pending || busy} onClick={() => void send({ type: "e2eListRepo", projectId: project.id })}>
                 <ScanSearch size={14} /> Scan again
@@ -523,6 +572,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </p>
         )}
         {project.e2eActivity?.suite !== "unit" && <Activity project={project} send={send} pending={pending} />}
+        {repo && <AccountCheck project={project} />}
         {project.e2eNotice && (
           <p className="e2e-notice">
             <CheckCircle2 size={14} /> {project.e2eNotice}

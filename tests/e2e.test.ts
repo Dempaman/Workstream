@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { probeSite, scanTests, assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, repoTests, runnableCopy, saveToRepo } from "../electron/e2e";
+import { accountInEnv, probeSite, scanTests, assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, repoTests, runnableCopy, saveToRepo } from "../electron/e2e";
 
 const recording = `import { test, expect } from '@playwright/test';
 
@@ -173,5 +173,18 @@ describe("site check and test scan", () => {
       ["vitest", 2, false],
       ["storybook", 1, false],
     ]);
+  });
+});
+
+describe("test account in .env.local", () => {
+  it("only reports whether the values are set, never the values", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "workstream-env-"));
+    expect(await accountInEnv(repo)).toEqual({ username: false, password: false, file: ".env.local" });
+    await writeFile(join(repo, ".env.local"), "VITE_X=1\nE2E_USERNAME=buyer@example.invalid\nE2E_PASSWORD=\n");
+    expect(await accountInEnv(repo)).toEqual({ username: true, password: false, file: ".env.local" });
+    await writeFile(join(repo, ".env.local"), 'E2E_USERNAME="buyer@example.invalid"\r\nE2E_PASSWORD=S3cret.pass!\r\n');
+    const found = await accountInEnv(repo);
+    expect(found).toEqual({ username: true, password: true, file: ".env.local" });
+    expect(JSON.stringify(found)).not.toContain("S3cret");
   });
 });

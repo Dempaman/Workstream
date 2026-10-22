@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
-import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, probeSite, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, scanTests, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
+import { accountInEnv, accountValues, assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, probeSite, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, scanTests, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
 import { Sites } from "./site";
 import { listUnitFiles, runUnitTests, unitRunner } from "./unittests";
 import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
@@ -963,6 +963,7 @@ export class Workflow {
           ...project.e2e,
           ...(command.source ? { source: command.source } : {}),
           baseUrl: command.baseUrl,
+          ...(command.customUrl !== undefined ? { customUrl: command.customUrl } : {}),
           browser: command.browser,
           headed: command.headed,
           username: command.username || undefined,
@@ -1048,6 +1049,11 @@ export class Workflow {
       case "e2eListRepo": {
         const project = this.getProject(command.projectId);
         project.e2eConfig = await repoConfig(project.path);
+        // With its own Playwright suite the project needs no setup here: sensible defaults, account from .env.local.
+        if (project.e2eConfig) {
+          project.e2e ??= { baseUrl: "http://localhost:3000/", browser: "msedge", headed: true };
+          project.e2eAccount = await accountInEnv(project.path);
+        }
         if (!project.e2eConfig || !project.e2e) {
           project.testScan = await scanTests(project.path, 0).catch(() => project.testScan);
           break;
@@ -2223,7 +2229,7 @@ export class Workflow {
   }
   /** Whether this project runs the repository's own Playwright suite. */
   private repoMode(project: Project) {
-    return (project.e2e?.source ?? (project.e2eConfig ? "repository" : "workstream")) === "repository" && Boolean(project.e2eConfig);
+    return Boolean(project.e2eConfig);
   }
   /** Runs the repository's suite (all tests, or the chosen file:line ids) and records the results. */
   private async runRepoTests(project: Project, settings: NonNullable<Project["e2e"]>, only: string[] | undefined, run?: Run) {
@@ -2248,8 +2254,8 @@ export class Workflow {
       const outcome = await runRepoSuite({
         repo: project.path,
         dir: this.e2eFolder(project),
-        settings,
-        password: this.secrets.get(`e2e-password:${project.id}`),
+        // The account comes from the repository's .env.local, the same place VS Code reads it from.
+        settings: { ...settings, username: undefined },
         only,
         signal: controller.signal,
         onOutput: (line) => {
@@ -2305,9 +2311,13 @@ export class Workflow {
     project.e2eActivity = { kind: "recording", journeyId, startedAt: new Date().toISOString(), queue: [], output: [] };
     this.emit();
     try {
-      const password = this.secrets.get(`e2e-password:${project.id}`);
+      // Strip the account you type while recording: from .env.local for the repository's tests, else Workstream's copy.
+      const account = this.repoMode(project)
+        ? await accountValues(project.path)
+        : { username: settings.username, password: this.secrets.get(`e2e-password:${project.id}`) };
+      const password = account.password;
       const raw = await record(project.path, this.e2eFolder(project), settings, settings.baseUrl, controller.signal);
-      const code = cleanRecording(raw, { username: settings.username, password });
+      const code = cleanRecording(raw, account);
       if (containsSecret(code, password)) throw new Error("The recording still contains the password. It was not saved.");
       if (this.repoMode(project)) {
         const path = await saveToRepo(project.path, name, code);

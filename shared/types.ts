@@ -155,6 +155,8 @@ export interface E2eSettings {
   /** Test account user name. The password is kept encrypted, outside state.json. */
   username?: string;
   hasPassword?: boolean;
+  /** You set the address yourself; otherwise the repository's Playwright config decides it. */
+  customUrl?: boolean;
   /** Run the repository's own Playwright suite (npm run test:e2e) or journeys kept in Workstream. */
   source?: "repository" | "workstream";
   /** Last reachability check of baseUrl. */
@@ -320,6 +322,8 @@ export interface Project {
   /** The repository's playwright.config file, when it has its own E2E suite. */
   e2eConfig?: string;
   unitTests?: UnitFile[];
+  /** Whether .env.local in the repository sets E2E_USERNAME and E2E_PASSWORD (values are never read out). */
+  e2eAccount?: { username: boolean; password: boolean; file: string };
   unitRunner?: "vitest" | "jest";
   /** The dev server Workstream started for this project (not saved). */
   site?: SiteStatus;
@@ -702,6 +706,7 @@ export const commandSchema = z.discriminatedUnion("type", [
     browser: z.enum(["msedge", "chrome"]),
     headed: z.boolean(),
     source: z.enum(["repository", "workstream"]).optional(),
+    customUrl: z.boolean().optional(),
     username: z.string().trim().max(300).optional(),
     /** Omit to keep the saved password; null removes it. */
     password: z.string().min(1).max(500).nullable().optional(),
