@@ -294,6 +294,8 @@ export interface Project {
   e2eError?: string;
   /** The repository's playwright.config file, when it has its own E2E suite. */
   e2eConfig?: string;
+  /** Kinds of tests found in the repository (Playwright, Vitest, Storybook...). */
+  testScan?: { id: "playwright" | "vitest" | "jest" | "cypress" | "storybook"; label: string; files: number; runnable: boolean; note: string }[];
   /** A short success message on the E2E page, such as where a recording was saved. */
   e2eNotice?: string;
   repoTests?: RepoTest[];
@@ -679,6 +681,7 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("e2eRun"), projectId: z.string(), journeyIds: z.array(z.string()).max(50).optional(), runId: z.string().optional() }),
   z.object({ type: z.literal("e2eStop"), projectId: z.string() }),
   z.object({ type: z.literal("e2eListRepo"), projectId: z.string() }),
+  z.object({ type: z.literal("e2eCheckSite"), projectId: z.string() }),
   z.object({ type: z.literal("e2eDelete"), projectId: z.string(), journeyId: z.string() }),
   z.object({ type: z.literal("e2eRename"), projectId: z.string(), journeyId: z.string(), name: z.string().trim().min(1).max(120) }),
   z.object({ type: z.literal("e2eOpen"), projectId: z.string(), journeyId: z.string(), what: z.enum(["code", "screenshot", "trace", "video", "folder"]) }),

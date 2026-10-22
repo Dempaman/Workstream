@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { effectiveSetup, readSkills, roleAddendum, roles, skillFile } from "./agentsetup";
-import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
+import { assertLocal, cleanRecording, containsSecret, e2eDir, journeyFile, probeSite, pruneRuns, pruneRunsIn, record, repoConfig, repoFile, scanTests, runJourney, runRepoSuite, saveToRepo, showTrace } from "./e2e";
 import { appSkillDir, generatorInstructions, generatorPrompt, saveSkills, skillDraftSchema, skillName } from "./skillgen";
 import { dirname, join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -988,25 +988,40 @@ export class Workflow {
           if (current !== run.branch)
             throw new Error(`Your repository is on ${current || "a detached commit"}, not ${run.branch}. Click Check out in my repo first, then Start localhost.`);
         }
-        if (!(await this.siteReachable(project, settings)))
-          throw new Error(`Nothing answers at ${settings.baseUrl}. Start the site first (Start localhost), then run the tests.`);
+        project.e2eError = undefined;
+        // The repository's Playwright config starts the site itself (webServer) when it is not running.
+        if (!repo && !(await this.siteReachable(project, settings))) {
+          project.e2eError = `Nothing answers at ${settings.baseUrl}. Press Start site (or run npm run start), then run the tests again.`;
+          break;
+        }
         if (repo) void this.runRepoTests(project, settings, command.journeyIds, run);
         else void this.runJourneys(project, settings, journeys.map((j) => j.id), run);
+        break;
+      }
+      case "e2eCheckSite": {
+        const project = this.getProject(command.projectId);
+        if (project.e2e) await this.siteReachable(project, project.e2e);
         break;
       }
       case "e2eListRepo": {
         const project = this.getProject(command.projectId);
         project.e2eConfig = await repoConfig(project.path);
-        if (!project.e2eConfig || !project.e2e) break;
-        const listed = await runRepoSuite({
-          repo: project.path,
-          dir: this.e2eFolder(project),
-          settings: project.e2e,
-          list: true,
-        });
+        if (!project.e2eConfig || !project.e2e) {
+          project.testScan = await scanTests(project.path, 0).catch(() => project.testScan);
+          break;
+        }
+        let listed;
+        try {
+          listed = await runRepoSuite({ repo: project.path, dir: this.e2eFolder(project), settings: project.e2e, list: true });
+        } catch (error) {
+          project.e2eError = `Could not read the repository's tests: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1500);
+          break;
+        }
         const previous = new Map((project.repoTests ?? []).map((t) => [t.id, t.result]));
         project.repoTests = listed.tests.map((t) => ({ ...t, ...(previous.get(t.id) ? { result: previous.get(t.id) } : {}) }));
         project.e2eError = listed.error;
+        project.testScan = await scanTests(project.path, listed.tests.length).catch(() => project.testScan);
+        await this.siteReachable(project, project.e2e);
         break;
       }
       case "e2eStop": {
@@ -2196,13 +2211,7 @@ export class Workflow {
     return journey;
   }
   private async siteReachable(project: Project, settings: NonNullable<Project["e2e"]>) {
-    let reachable = false;
-    try {
-      const response = await this.networkFetch(assertLocal(settings.baseUrl).href, { signal: AbortSignal.timeout(8000), redirect: "manual" });
-      reachable = response.status > 0 && response.status < 500;
-    } catch {
-      reachable = false;
-    }
+    const reachable = await probeSite(settings.baseUrl).catch(() => false);
     if (project.e2e) Object.assign(project.e2e, { reachable, checkedAt: new Date().toISOString() });
     return reachable;
   }

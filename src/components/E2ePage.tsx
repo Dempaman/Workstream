@@ -13,12 +13,15 @@ import {
   LoaderCircle,
   Play,
   RotateCcw,
+  ScanSearch,
   Square,
   Trash2,
   Waypoints,
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { TechIcon } from "@/components/TechStack";
+import { bridge } from "@/lib/bridge";
 import { cn } from "@/lib/utils";
 import type { Command, E2eResult, Project, Run, Snapshot } from "../../shared/types";
 
@@ -103,7 +106,7 @@ function JourneyRow({ project, journey, send, pending, busy }: { project: Projec
   return (
     <li className={cn("journey", result?.status, running && "running")}>
       <div className="journey-head">
-        <Waypoints size={16} />
+        {repo ? <TechIcon id="playwright" size={18} title="Playwright test" /> : <Waypoints size={16} />}
         {repo ? (
           <span className="journey-title">
             {journey.name}
@@ -265,6 +268,7 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
         )}
         {e2e && (
           <>
+            <SiteWatcher project={project} />
             <span className={cn("e2e-site", e2e.reachable ? "up" : e2e.reachable === false ? "down" : "")}>
               <Circle size={9} fill="currentColor" />
               {e2e.reachable ? "Site is running" : e2e.reachable === false ? "Site is not running" : "Not checked"}
@@ -275,14 +279,32 @@ function Settings({ project, send, pending }: { project: Project; send: Send; pe
           </>
         )}
       </div>
+      {e2e && !e2e.reachable && repoMode(project) && (
+        <p className="muted-note">
+          No need to start it first: when you press Run, the repository's Playwright config starts npm run start
+          itself and stops it afterwards. Start site keeps it running in a window of its own instead.
+        </p>
+      )}
     </section>
   );
 }
 
-/** Reads the repository's test list once when the page opens on a project. */
-function ListOnOpen({ project, send }: { project: Project; send: Send }) {
+/** Keeps "Site is running" current while the page is open, without blocking the buttons. */
+function SiteWatcher({ project }: { project: Project }) {
   useEffect(() => {
-    if (project.e2e) void send({ type: "e2eListRepo", projectId: project.id });
+    if (!project.e2e) return;
+    const check = () => void bridge.command({ type: "e2eCheckSite", projectId: project.id }).catch(() => {});
+    check();
+    const timer = setInterval(check, 15_000);
+    return () => clearInterval(timer);
+  }, [project.id, project.e2e?.baseUrl]);
+  return null;
+}
+
+/** Reads the repository's test list once when the page opens on a project. */
+function ListOnOpen({ project }: { project: Project }) {
+  useEffect(() => {
+    void bridge.command({ type: "e2eListRepo", projectId: project.id }).catch(() => {});
     // Once per project; the list refreshes after each run.
   }, [project.id]);
   return null;
@@ -336,16 +358,42 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
       <Settings key={project.id} project={project} send={send} pending={pending} />
       <section className="panel e2e-journeys">
         <div className="e2e-journeys-head">
-          <h2>
-            <Waypoints size={16} /> {repo ? "Tests in the repository" : "Journeys"}
-          </h2>
-          {repo && <ListOnOpen project={project} send={send} />}
-          {(items.length > 1 || (repo && items.length > 0)) && (
-            <Button disabled={pending || busy || !project.e2e} onClick={() => void send({ type: "e2eRun", projectId: project.id })}>
-              <Play size={14} /> Run all
-            </Button>
-          )}
+          <div>
+            <h2>
+              {repo ? <TechIcon id="playwright" size={18} /> : <Waypoints size={16} />}{" "}
+              {repo ? "Playwright tests in the repository" : "Journeys"}
+            </h2>
+            {repo && (
+              <small className="e2e-sub">
+                Found by Playwright in {project.e2eConfig}: {items.length} {items.length === 1 ? "test" : "tests"}
+              </small>
+            )}
+          </div>
+          <ListOnOpen project={project} />
+          <div className="button-row">
+            {repo && (
+              <Button variant="outline" disabled={pending || busy} onClick={() => void send({ type: "e2eListRepo", projectId: project.id })}>
+                <ScanSearch size={14} /> Scan again
+              </Button>
+            )}
+            {(items.length > 1 || (repo && items.length > 0)) && (
+              <Button disabled={pending || busy || !project.e2e} onClick={() => void send({ type: "e2eRun", projectId: project.id })}>
+                {busy && project.e2eActivity?.kind === "running" ? <LoaderCircle size={14} className="spin" /> : <Play size={14} />} Run all
+              </Button>
+            )}
+          </div>
         </div>
+        {!!project.testScan?.length && (
+          <div className="test-scan">
+            <span className="muted-note">Tests in {project.name}:</span>
+            {project.testScan.map((kind) => (
+              <span key={kind.id} className={cn("scan-chip", kind.runnable && "runnable")} title={kind.runnable ? "Workstream runs these" : "Shown for information"}>
+                <TechIcon id={kind.id === "vitest" ? "vite" : kind.id} size={14} />
+                <strong>{kind.files}</strong> {kind.label} {kind.note}
+              </span>
+            ))}
+          </div>
+        )}
         {project.e2eError && (
           <p className="inline-error">
             <AlertTriangle size={14} /> {project.e2eError}

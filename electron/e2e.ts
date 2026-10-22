@@ -375,3 +375,78 @@ export async function saveToRepo(repo: string, name: string, code: string) {
   await writeFile(file, body);
   return `e2e/${slug}.spec.ts`;
 }
+
+/**
+ * Checks whether something answers at a local address. Tries localhost's IPv4
+ * and IPv6 addresses separately, because dev servers often listen on only one
+ * of them, and any HTTP answer (even a redirect or 404) means the site is up.
+ */
+export async function probeSite(url: string, timeoutMs = 4000) {
+  const target = assertLocal(url);
+  const { request } = await import("node:http");
+  const hosts = target.hostname === "localhost" ? ["127.0.0.1", "::1"] : [target.hostname.replace(/^\[|\]$/g, "")];
+  const port = Number(target.port || 80);
+  const one = (host: string) =>
+    new Promise<boolean>((resolveProbe) => {
+      const req = request({ host, port, path: target.pathname || "/", method: "GET", timeout: timeoutMs, headers: { host: target.host } }, (res) => {
+        res.resume();
+        resolveProbe(true);
+      });
+      req.on("timeout", () => {
+        req.destroy();
+        resolveProbe(false);
+      });
+      req.on("error", () => resolveProbe(false));
+      req.end();
+    });
+  const results = await Promise.all(hosts.map(one));
+  return results.some(Boolean);
+}
+
+export interface TestScan {
+  id: "playwright" | "vitest" | "jest" | "cypress" | "storybook";
+  label: string;
+  files: number;
+  /** Workstream can run these here (only Playwright). */
+  runnable: boolean;
+  note: string;
+}
+
+/** Finds the kinds of tests a repository has, so the E2E page can say what is there. */
+export async function scanTests(repo: string, playwrightTests: number): Promise<TestScan[]> {
+  const pkg = JSON.parse(await readFile(join(repo, "package.json"), "utf8").catch(() => "{}")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  const counts = { unit: 0, cypress: 0, stories: 0, e2e: 0 };
+  const skip = new Set(["node_modules", ".git", "build", "dist", "coverage", "storybook-static", "test-results", "playwright-report", ".worktrees"]);
+  const walk = async (dir: string, depth: number, rel: string) => {
+    if (depth > 8) return;
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (skip.has(entry.name) || entry.name.startsWith(".")) continue;
+      const path = join(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(path, depth + 1, relPath);
+      else if (/\.cy\.[cm]?[jt]sx?$/.test(entry.name)) counts.cypress++;
+      else if (/\.stories\.[cm]?[jt]sx?$/.test(entry.name)) counts.stories++;
+      else if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(entry.name)) {
+        if (/^(e2e|tests?-e2e|playwright)\//.test(relPath)) counts.e2e++;
+        else counts.unit++;
+      }
+    }
+  };
+  await walk(repo, 0, "");
+  const scan: TestScan[] = [];
+  if (deps.playwright || deps["@playwright/test"] || playwrightTests)
+    scan.push({ id: "playwright", label: "Playwright", files: playwrightTests, runnable: true, note: playwrightTests === 1 ? "end-to-end test" : "end-to-end tests" });
+  if (deps.vitest && counts.unit)
+    scan.push({ id: "vitest", label: "Vitest", files: counts.unit, runnable: false, note: counts.unit === 1 ? "unit test file, run by the task checks" : "unit test files, run by the task checks" });
+  else if (deps.jest && counts.unit)
+    scan.push({ id: "jest", label: "Jest", files: counts.unit, runnable: false, note: "unit test files, run by the task checks" });
+  if (counts.cypress)
+    scan.push({ id: "cypress", label: "Cypress", files: counts.cypress, runnable: false, note: "Cypress specs (not run by Workstream yet)" });
+  if (counts.stories)
+    scan.push({ id: "storybook", label: "Storybook", files: counts.stories, runnable: false, note: counts.stories === 1 ? "story file" : "story files" });
+  return scan;
+}

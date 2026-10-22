@@ -5497,3 +5497,33 @@ ul.tech-stack.tech-stack {
 .journey.skipped {
   border-left-color: #d97706;
 }
+.e2e-journeys-head h2 svg,
+.e2e-journeys-head h2 img {
+  flex: none;
+}
+.e2e-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  color: light-dark(#4a5565, #9aa8bd);
+}
+.test-scan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.scan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid light-dark(#d9dfe8, #2c394d);
+  color: light-dark(#36404c, #c3cede);
+}
+.scan-chip.runnable {
+  border-color: light-dark(#86cfa6, #2f6b4c);
+  background: light-dark(#f1faf5, #13261f);
+}

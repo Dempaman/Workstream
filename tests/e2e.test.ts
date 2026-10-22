@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, repoTests, runnableCopy, saveToRepo } from "../electron/e2e";
+import { probeSite, scanTests, assertLocal, cleanRecording, containsSecret, journeyFile, parseReport, remoteNavigations, repoTests, runnableCopy, saveToRepo } from "../electron/e2e";
 
 const recording = `import { test, expect } from '@playwright/test';
 
@@ -107,7 +107,9 @@ describe("E2E settings in Workstream", () => {
     const { workflow, project } = await setup(false);
     await workflow.command({ type: "e2eSettings", projectId: project.id, baseUrl: "http://localhost:3000/sv/", browser: "msedge", headed: true });
     project.journeys = [{ id: "0b6f9c2e-1111-4222-8333-444455556666", name: "Checkout", createdAt: "x", updatedAt: "x" }];
-    await expect(workflow.command({ type: "e2eRun", projectId: project.id })).rejects.toThrow(/Nothing answers at http:\/\/localhost:3000\/sv\//);
+    await workflow.command({ type: "e2eSettings", projectId: project.id, baseUrl: "http://localhost:59111/sv/", browser: "msedge", headed: true });
+    await workflow.command({ type: "e2eRun", projectId: project.id });
+    expect(project.e2eError).toMatch(/Nothing answers at http:\/\/localhost:59111\/sv\/\. Press Start site/);
     expect(project.e2e?.reachable).toBe(false);
     expect(project.e2eActivity).toBeUndefined();
   });
@@ -141,5 +143,35 @@ describe("the repository's own E2E suite", () => {
     expect(text).toContain('test("Checkout with invoice"');
     expect(text).not.toContain("S3cret");
     await expect(saveToRepo(repo, "Checkout with invoice", code)).rejects.toThrow(/already exists/);
+  });
+});
+
+import { createServer } from "node:http";
+import { mkdir, writeFile } from "node:fs/promises";
+
+describe("site check and test scan", () => {
+  it("sees a dev server that listens on only 127.0.0.1, and a closed port as down", async () => {
+    const server = createServer((_req, res) => res.writeHead(302, { location: "/sv/" }).end());
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+    const port = (server.address() as { port: number }).port;
+    expect(await probeSite(`http://localhost:${port}/sv/`)).toBe(true);
+    server.close();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(await probeSite(`http://localhost:${port}/sv/`, 1000)).toBe(false);
+  });
+
+  it("finds Playwright, Vitest and Storybook tests and skips node_modules", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "workstream-scan-"));
+    await writeFile(join(repo, "package.json"), JSON.stringify({ devDependencies: { playwright: "1.57.0", vitest: "4" } }));
+    for (const file of ["src/a.test.ts", "src/b/c.test.tsx", "src/x.stories.tsx", "e2e/checkout.spec.ts", "node_modules/lib/z.test.ts"]) {
+      await mkdir(join(repo, file, ".."), { recursive: true });
+      await writeFile(join(repo, file), "");
+    }
+    const scan = await scanTests(repo, 1);
+    expect(scan.map((s) => [s.id, s.files, s.runnable])).toEqual([
+      ["playwright", 1, true],
+      ["vitest", 2, false],
+      ["storybook", 1, false],
+    ]);
   });
 });
