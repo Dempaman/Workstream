@@ -119,3 +119,31 @@ export async function updateJira(
       transition: { id: transitionId },
     });
 }
+
+export interface JiraListItem {
+  key: string;
+  title: string;
+  status?: string;
+  type?: string;
+}
+
+/** Your open Jira tickets (assigned to you, not done), newest first, to start a task from. */
+export async function jiraMine(connectors: Connectors, site: AtlassianSite): Promise<JiraListItem[]> {
+  const { text, structured } = await connectors.call("atlassian", "searchJiraIssuesUsingJql", {
+    cloudId: site.id,
+    jql: "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
+    maxResults: 25,
+    fields: ["summary", "status", "issuetype"],
+  });
+  const data = (structured ?? parse(text)) as { issues?: unknown[] } | unknown[] | undefined;
+  const issues = Array.isArray(data) ? data : (data?.issues ?? []);
+  return issues
+    .map((issue) => issue as { key?: string; fields?: { summary?: string; status?: { name?: string }; issuetype?: { name?: string } } })
+    .filter((issue) => issue.key && /^[A-Za-z][A-Za-z0-9]*-[0-9]+$/.test(issue.key))
+    .map((issue) => ({
+      key: issue.key!,
+      title: String(issue.fields?.summary ?? issue.key),
+      status: issue.fields?.status?.name,
+      type: issue.fields?.issuetype?.name,
+    }));
+}

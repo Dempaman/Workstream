@@ -498,14 +498,14 @@ export function TryLocally({
                 variant="outline"
                 disabled={pending}
                 onClick={() =>
-                  void act("Start localhost", {
-                    type: "startDevServer",
+                  void act(run.devServer ? "Stop localhost" : "Start localhost", {
+                    type: run.devServer ? "stopDevServer" : "startDevServer",
                     runId: run.id,
                   })
                 }
               >
                 <TechIcon id="node" size={13} />{" "}
-                {run.devServer ? "Start localhost again" : "Start localhost"}
+                {run.devServer ? (run.devServer.url ? "Stop localhost" : "Starting… (stop)") : "Start localhost"}
               </Button>
             )}
             {offBranch && (

@@ -64,6 +64,16 @@ export function execute(
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
       signal: options.signal,
     });
+    // Stop ends the whole process tree on Windows (for example a dev server a test runner started).
+    if (process.platform === "win32" && options.signal)
+      options.signal.addEventListener(
+        "abort",
+        () => {
+          if (child.pid)
+            spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore", shell: false }).on("error", () => {});
+        },
+        { once: true },
+      );
     let output = "";
     let stdout = "";
     let stderr = "";

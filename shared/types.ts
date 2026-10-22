@@ -198,6 +198,7 @@ export interface SiteStatus {
   command: string;
   log: string[];
   error?: string;
+  url?: string;
 }
 /** A test in the repository's own E2E suite. */
 export interface RepoTest {
@@ -315,6 +316,8 @@ export interface Project {
   /** The latest "Generate project skills" draft, until saved or discarded. */
   skillDraft?: SkillDraft;
   e2e?: E2eSettings;
+  /** Which tests run before a task is published. Missing means: the ones the project has. */
+  testGate?: { unit: boolean; e2e: boolean };
   journeys?: Journey[];
   e2eActivity?: E2eActivity;
   /** The last recording or run error shown on the E2E page. */
@@ -396,6 +399,10 @@ export interface Settings {
   copilotPath?: string;
   /** How Claude agents sign in. Missing means your Claude Code sign-in. */
   claudeAuth?: ClaudeAuth;
+  /** How many tasks may run at the same time (1 to 3). Missing means 2. */
+  parallelTasks?: number;
+  /** Ask before a task costs more than this (USD). Missing or 0 means no limit. */
+  costLimitUsd?: number;
   /** Your own prices (USD per 1M tokens) for cost estimates, keyed by model id. */
   prices?: Record<string, ModelPrice>;
   profiles: Record<Role, Profile>;
@@ -487,6 +494,22 @@ export function activeRevision(run: Pick<Run, "revisions">) {
   return last && !last.completedAt ? last : undefined;
 }
 export interface Run {
+  /** Cost this task may reach before it stops and asks (raised with "Allow more"). */
+  costAllowanceUsd?: number;
+  /** The task stopped because it reached the cost limit. */
+  costLimitHit?: boolean;
+  /** Tests run on the task's branch right before publishing. */
+  testGate?: {
+    status: "running" | "passed" | "failed" | "skipped";
+    startedAt: string;
+    /** The reviewed content these results belong to. */
+    hash?: string;
+    unit?: { files: number; failed: number; failures: { file: string; title: string; message: string }[] };
+    e2e?: { tests: number; failed: number; failures: { title: string; message: string; screenshot?: string }[] };
+    notes: string[];
+    /** You chose to publish without passing tests, with this reason. */
+    overridden?: string;
+  };
   /** End-to-end journeys run for this task (Try it locally). */
   e2e?: { journeyId: string; name: string; result: E2eResult }[];
   /** Your line comments from the Changes tab. */
@@ -600,6 +623,16 @@ export interface Runtime {
   /** Something worth knowing that is not an error, for example a followed Codex app update. */
   note?: string;
 }
+/** One line on the Health page. */
+export interface HealthItem {
+  id: string;
+  group: string;
+  label: string;
+  status: "ok" | "warn" | "fail" | "skip";
+  detail: string;
+  /** What to do about it, in plain words. */
+  fix?: string;
+}
 export interface AgentApproval {
   canAllowSession?: boolean;
   tool?: string;
@@ -611,6 +644,9 @@ export interface AgentApproval {
   details: string;
 }
 export interface Snapshot extends State {
+  health?: { checkedAt: string; running: boolean; items: HealthItem[] };
+  /** Your open Jira tickets, after "My tickets" in New task. */
+  jiraList?: { key: string; title: string; status?: string; type?: string }[];
   runtime: Runtime;
   claude: Runtime & { hasKey: boolean };
   copilot: Runtime;
@@ -716,6 +752,11 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("e2eStop"), projectId: z.string() }),
   z.object({ type: z.literal("e2eListRepo"), projectId: z.string() }),
   z.object({ type: z.literal("e2eCheckSite"), projectId: z.string() }),
+  z.object({ type: z.literal("healthCheck") }),
+  z.object({ type: z.literal("jiraMine") }),
+  z.object({ type: z.literal("raiseCostLimit"), runId: z.string() }),
+  z.object({ type: z.literal("testGateSettings"), projectId: z.string(), unit: z.boolean(), e2e: z.boolean() }),
+  z.object({ type: z.literal("publishWithoutTests"), runId: z.string(), reason: z.string().trim().min(5).max(1000) }),
   z.object({ type: z.literal("e2eStopSite"), projectId: z.string() }),
   z.object({ type: z.literal("unitList"), projectId: z.string() }),
   z.object({ type: z.literal("unitRun"), projectId: z.string(), files: z.array(z.string().max(500)).max(200).optional() }),
@@ -746,6 +787,7 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("checkoutInRepo"), runId: z.string() }),
   z.object({ type: z.literal("switchRepoBack"), runId: z.string() }),
   z.object({ type: z.literal("startDevServer"), runId: z.string() }),
+  z.object({ type: z.literal("stopDevServer"), runId: z.string() }),
   z.object({ type: z.literal("openFolder"), runId: z.string() }),
   z.object({ type: z.literal("openInEditor"), runId: z.string() }),
   z.object({ type: z.literal("loginClaude") }),
@@ -895,6 +937,8 @@ export const commandSchema = z.discriminatedUnion("type", [
           }),
         )
         .optional(),
+      parallelTasks: z.number().int().min(1).max(3).optional(),
+      costLimitUsd: z.number().nonnegative().max(10000).optional(),
       profiles: z.object({
         planner: profileSchema,
         developer: profileSchema,

@@ -5,6 +5,7 @@ import {
   Circle,
   CircleDot,
   Code2,
+  FlaskConical,
   MinusCircle,
   Film,
   Globe,
@@ -445,7 +446,7 @@ function UnitTests({ project, send, pending }: { project: Project; send: Send; p
           </h2>
           <small className="e2e-sub">
             {files.length} {runner} test {files.length === 1 ? "file" : "files"}
-            {done.length ? ` · last run: ${failed ? `${failed} failing` : "all passing"}` : ""}. The same tests the task checks run.
+            {done.length ? ` · last run: ${failed ? `${failed} failing` : "all passing"}` : ""}. They also run before a task is published when ticked above.
           </small>
         </div>
         <div className="button-row">
@@ -534,6 +535,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
             ))}
           </div>
         )}
+      <GateSettings project={project} send={send} pending={pending} />
       {repo ? (
         project.e2e && (
           <section className="panel site-bar">
@@ -688,5 +690,111 @@ export function TaskE2e({ run, project, send, pending }: { run: Run; project: Pr
         </ul>
       )}
     </section>
+  );
+}
+
+/** The text sent to the developer when tests failed before publishing. */
+export function gateFixRequest(run: Run) {
+  const gate = run.testGate;
+  const lines = [
+    ...(gate?.unit?.failures ?? []).map((f) => `- Unit test ${f.file ? `${f.file}: ` : ""}${f.title}\n  ${f.message.split("\n").slice(0, 4).join("\n  ")}`),
+    ...(gate?.e2e?.failures ?? []).map((f) => `- End-to-end test "${f.title}"\n  ${f.message.split("\n").slice(0, 4).join("\n  ")}`),
+  ];
+  return `These tests failed on this branch before publishing:\n${lines.join("\n")}\n\nFind the cause in this task's changes and fix it with the smallest change. Only change a test when the approved plan changed the behaviour it checks.`.slice(0, 19000);
+}
+
+/** On a task: the tests that ran before publishing, and what you can do when they failed. */
+export function TestGatePanel({ run, send, pending }: { run: Run; send: Send; pending: boolean }) {
+  const gate = run.testGate;
+  const [reason, setReason] = useState("");
+  const [skipping, setSkipping] = useState(false);
+  if (!gate) return null;
+  const failed = gate.status === "failed";
+  return (
+    <section className={cn("panel detail-section test-gate", gate.status)}>
+      <div className="e2e-journeys-head">
+        <h2>
+          <FlaskConical size={16} /> Tests before publishing
+        </h2>
+        <span className={cn("e2e-pill", gate.status === "running" ? "running" : gate.status === "passed" ? "passed" : gate.status === "failed" ? "failed" : "none")}>
+          {gate.status === "running" ? <LoaderCircle size={13} className="spin" /> : gate.status === "passed" ? <CheckCircle2 size={13} /> : gate.status === "failed" ? <XCircle size={13} /> : <MinusCircle size={13} />}
+          {gate.status === "running" ? "Running" : gate.status === "passed" ? "Passed" : gate.status === "failed" ? (gate.overridden ? "Failed, published anyway" : "Failed") : "Skipped"}
+        </span>
+      </div>
+      <ul className="gate-lines">
+        {gate.unit && (
+          <li>
+            <TechIcon id="vite" size={14} /> Unit tests:{" "}
+            {gate.unit.failed ? `${gate.unit.failed} of ${gate.unit.files} files failing` : `${gate.unit.files} files passing`}
+          </li>
+        )}
+        {gate.e2e && (
+          <li>
+            <TechIcon id="playwright" size={14} /> End-to-end tests: {gate.e2e.failed ? `${gate.e2e.failed} failing` : `${gate.e2e.tests} passing`}
+          </li>
+        )}
+        {gate.notes.map((note) => (
+          <li key={note} className="muted-note">
+            {note}
+          </li>
+        ))}
+      </ul>
+      {[...(gate.unit?.failures ?? []).map((f) => ({ title: `${f.file ? `${f.file} › ` : ""}${f.title}`, message: f.message })), ...(gate.e2e?.failures ?? [])].map((f, i) => (
+        <div key={i} className="gate-failure">
+          <strong>{f.title}</strong>
+          <pre className="journey-error">{f.message}</pre>
+        </div>
+      ))}
+      {gate.overridden && <p className="muted-note">Published without passing tests. Your reason: {gate.overridden}</p>}
+      {failed && !gate.overridden && run.stage === "ready" && (
+        <div className="button-row">
+          <Button disabled={pending || run.status === "running"} onClick={() => void send({ type: "fixFindings", runId: run.id, request: gateFixRequest(run) })}>
+            Ask the developer to fix it
+          </Button>
+          <Button variant="outline" disabled={pending} onClick={() => void send({ type: "publish", runId: run.id })}>
+            <RotateCcw size={13} /> Run the tests again
+          </Button>
+          <Button variant="ghost" disabled={pending} onClick={() => setSkipping(!skipping)}>
+            Publish anyway…
+          </Button>
+        </div>
+      )}
+      {skipping && failed && !gate.overridden && (
+        <div className="gate-skip">
+          <label>
+            Why is it fine to publish with failing tests? This goes into the pull request.
+            <input value={reason} maxLength={1000} onChange={(e) => setReason(e.target.value)} placeholder="For example: the checkout test fails on integration today for every branch" />
+          </label>
+          <Button disabled={pending || reason.trim().length < 5} onClick={() => void send({ type: "publishWithoutTests", runId: run.id, reason })}>
+            Publish without passing tests
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Which tests run before a task is published, for this project. */
+export function GateSettings({ project, send, pending }: { project: Project; send: Send; pending: boolean }) {
+  const hasUnit = Boolean(project.unitTests?.length);
+  const hasE2e = Boolean(project.e2eConfig);
+  if (!hasUnit && !hasE2e) return null;
+  const gate = project.testGate ?? { unit: hasUnit, e2e: hasE2e };
+  const set = (patch: Partial<typeof gate>) => void send({ type: "testGateSettings", projectId: project.id, ...gate, ...patch });
+  return (
+    <div className="gate-settings">
+      <strong>Before a task is published, run:</strong>
+      {hasUnit && (
+        <label>
+          <input type="checkbox" disabled={pending} checked={gate.unit} onChange={(e) => set({ unit: e.target.checked })} /> Unit tests
+        </label>
+      )}
+      {hasE2e && (
+        <label>
+          <input type="checkbox" disabled={pending} checked={gate.e2e} onChange={(e) => set({ e2e: e.target.checked })} /> End-to-end tests
+          <small> (each checkout test places a test order on integration)</small>
+        </label>
+      )}
+    </div>
   );
 }

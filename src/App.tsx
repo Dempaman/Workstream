@@ -32,6 +32,7 @@ import {
   ShieldCheck,
   Sparkles,
   FlaskConical,
+  HeartPulse,
   Square,
   Terminal,
   Workflow as WorkflowIcon,
@@ -101,7 +102,9 @@ import {
   initialSetup,
 } from "@/components/AgentSetup";
 import { SkillGenerator } from "@/components/SkillGenerator";
-import { E2ePage, TaskE2e } from "@/components/E2ePage";
+import { E2ePage, TaskE2e, TestGatePanel } from "@/components/E2ePage";
+import { HealthPage } from "@/components/HealthPage";
+import { TaskStats } from "@/components/TaskStats";
 import {
   type Command,
   type Project,
@@ -127,6 +130,7 @@ type Page =
   | "connectors"
   | "memory"
   | "e2e"
+  | "health"
   | "workflow";
 const stageLabels: Record<Stage, string> = {
   intake: "Ready to plan",
@@ -411,25 +415,28 @@ export default function App() {
             Tests
           </button>
           <button
-            className={cn("nav-item", page === "connectors" && "active")}
-            onClick={() => navigate("connectors")}
+            className={cn("nav-item", page === "health" && "active")}
+            onClick={() => navigate("health")}
           >
-            <Plug size={18} />
-            Connectors
+            <HeartPulse size={18} />
+            Health
+            {(snapshot.health?.items.filter((i) => i.status === "fail").length ?? 0) > 0 && (
+              <span className="nav-count fail">{snapshot.health!.items.filter((i) => i.status === "fail").length}</span>
+            )}
           </button>
           <button
-            className={cn("nav-item", page === "connections" && "active")}
+            className={cn("nav-item", (page === "connections" || page === "connectors") && "active")}
             onClick={() => navigate("connections")}
           >
             <Cable size={18} />
-            Git providers
+            Connections
           </button>
           <button
             className={cn("nav-item", page === "workflow" && "active")}
             onClick={() => navigate("workflow")}
           >
             <Settings2 size={18} />
-            Workflow
+            How it works
           </button>
         </nav>
         <div className="sidebar-bottom">
@@ -496,11 +503,12 @@ export default function App() {
                     runs: "All runs",
                     projects: "Projects",
                     agents: "Agents & models",
-                    connections: "Git providers",
-                    connectors: "Connectors",
+                    connections: "Connections",
+                    connectors: "Connections",
                     memory: "Memory",
                     e2e: "Tests",
-                    workflow: "Workflow",
+                    health: "Health",
+                    workflow: "How it works",
                   }[page]}
             </strong>
           </div>
@@ -975,34 +983,35 @@ export default function App() {
                       </div>
                     </div>
                     <p>A little setup. A lot less busywork.</p>
-                    <div className="setup-progress">
-                      <span
-                        style={{
-                          width: `${(((snapshot.projects.length > 0 ? 1 : 0) + (snapshot.runtime.authenticated ? 1 : 0) + (snapshot.runs.length > 0 ? 1 : 0)) / 3) * 100}%`,
-                        }}
-                      />
-                    </div>
-                    <SetupStep
-                      number="1"
-                      done={snapshot.projects.length > 0}
-                      title="Connect a repository"
-                      description="Choose a project on your computer"
-                      onClick={() => setDialog("project")}
-                    />
-                    <SetupStep
-                      number="2"
-                      done={snapshot.runtime.authenticated}
-                      title="Meet your agents"
-                      description="Connect Codex and choose models"
-                      onClick={() => navigate("agents")}
-                    />
-                    <SetupStep
-                      number="3"
-                      done={snapshot.runs.length > 0}
-                      title="Create your first task"
-                      description="A ticket, a bug, or a new idea"
-                      onClick={createTask}
-                    />
+                    {(() => {
+                      const engines = snapshot.runtime.authenticated || snapshot.claude.authenticated || snapshot.copilot.authenticated;
+                      const providers = new Set(snapshot.projects.filter((p) => !p.archived).map((p) => p.provider));
+                      const signedIn = [...providers].every((p) => p === "other" || snapshot.connections?.[p as "azure" | "github"]?.signedIn);
+                      const skills = snapshot.projects.some((p) => (p.skillInfo ?? []).some((k) => !k.workflow));
+                      const tests = snapshot.projects.some((p) => p.e2eConfig || (p.unitTests ?? []).length);
+                      const steps = [
+                        { done: snapshot.projects.length > 0, title: "Connect a repository", description: "Choose a project on your computer", go: () => setDialog("project") },
+                        { done: engines, title: "Meet your agents", description: "Connect Codex, Claude or Copilot and choose models", go: () => navigate("agents") },
+                        { done: providers.size > 0 && signedIn, title: "Sign in to publish", description: "Azure DevOps or GitHub, for pull requests", go: () => navigate("connections") },
+                        { done: skills, title: "Give the agents project skills", description: "Generate them from your code in Agents & models", go: () => navigate("agents") },
+                        { done: tests, title: "Add tests that run before publishing", description: "Unit tests and end-to-end journeys", go: () => navigate("e2e") },
+                        { done: snapshot.runs.length > 0, title: "Create your first task", description: "A ticket, a bug, or a new idea", go: createTask },
+                      ];
+                      const doneCount = steps.filter((x) => x.done).length;
+                      return (
+                        <>
+                          <div className="setup-progress">
+                            <span style={{ width: `${(doneCount / steps.length) * 100}%` }} />
+                          </div>
+                          {steps.map((step, i) => (
+                            <SetupStep key={step.title} number={String(i + 1)} done={step.done} title={step.title} description={step.description} onClick={step.go} />
+                          ))}
+                          <button type="button" className="health-link" onClick={() => navigate("health")}>
+                            Check that everything works (Health)
+                          </button>
+                        </>
+                      );
+                    })()}
                     <div className="setup-note">
                       <Sparkles size={16} />
                       <p>
@@ -1014,6 +1023,7 @@ export default function App() {
                   </aside>
                 )}
               </div>
+              {page === "overview" && <TaskStats snapshot={snapshot} />}
               <div className="page-footer">
                 <span>
                   <span className="tiny-dot" /> Built for deliberate, dependable
@@ -1038,12 +1048,26 @@ export default function App() {
             />
           ) : page === "memory" ? (
             <MemoryPage snapshot={snapshot} pending={pending} send={send} />
+          ) : page === "health" ? (
+            <HealthPage snapshot={snapshot} pending={pending} send={send} />
           ) : page === "e2e" ? (
             <E2ePage snapshot={snapshot} pending={pending} send={send} />
-          ) : page === "connectors" ? (
-            <ConnectorsPage snapshot={snapshot} pending={pending} send={send} />
-          ) : page === "connections" ? (
-            <Connections snapshot={snapshot} pending={pending} send={send} />
+          ) : page === "connectors" || page === "connections" ? (
+            <>
+              <div className="page-tabs" role="tablist" aria-label="Connections">
+                <button role="tab" aria-selected={page === "connections"} className={cn(page === "connections" && "active")} onClick={() => navigate("connections")}>
+                  <Cable size={15} /> Git providers <small>publishing pull requests</small>
+                </button>
+                <button role="tab" aria-selected={page === "connectors"} className={cn(page === "connectors" && "active")} onClick={() => navigate("connectors")}>
+                  <Plug size={15} /> Connectors <small>Jira, Figma and others for the agents</small>
+                </button>
+              </div>
+              {page === "connectors" ? (
+                <ConnectorsPage snapshot={snapshot} pending={pending} send={send} />
+              ) : (
+                <Connections snapshot={snapshot} pending={pending} send={send} />
+              )}
+            </>
           ) : (
             <WorkflowPage />
           )}
@@ -1203,9 +1227,11 @@ function TaskForm({
   const [imageBusy, setImageBusy] = useState(false);
   const [jiraKey, setJiraKey] = useState("");
   const [importing, setImporting] = useState(false);
-  const importJira = async () => {
+  const [listing, setListing] = useState(false);
+  const [jiraList, setJiraList] = useState<Snapshot["jiraList"]>();
+  const importJira = async (key = jiraKey.trim()) => {
     setImporting(true);
-    const next = await send({ type: "importJira", key: jiraKey.trim() });
+    const next = await send({ type: "importJira", key });
     setImporting(false);
     const ticket = next?.jiraImport;
     if (ticket) {
@@ -1257,7 +1283,43 @@ function TaskForm({
             {importing && <LoaderCircle className="spin" size={14} />}
             <TechIcon id="jira" size={13} /> Import from Jira
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={listing}
+            onClick={async () => {
+              setListing(true);
+              const next = await send({ type: "jiraMine" });
+              setJiraList(next?.jiraList ?? []);
+              setListing(false);
+            }}
+          >
+            {listing && <LoaderCircle className="spin" size={14} />} My tickets
+          </Button>
         </div>
+      )}
+      {jira && jiraList && (
+        <ul className="jira-list">
+          {jiraList.length ? (
+            jiraList.map((ticket) => (
+              <li key={ticket.key}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setJiraKey(ticket.key);
+                    void importJira(ticket.key);
+                  }}
+                >
+                  <strong>{ticket.key}</strong>
+                  <span>{ticket.title}</span>
+                  {ticket.status && <small>{ticket.status}</small>}
+                </button>
+              </li>
+            ))
+          ) : (
+            <li className="muted-note">No open tickets assigned to you.</li>
+          )}
+        </ul>
       )}
       <Field label="Project">
         <select
@@ -2128,6 +2190,46 @@ function Agents({
         }
         onOpen={(url) => void send({ type: "openExternal", url })}
       />
+      <section className="panel limits-panel">
+        <h2>Limits</h2>
+        <div className="limits-grid">
+          <label>
+            Cost limit per task (USD)
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={settings.costLimitUsd ?? ""}
+              placeholder="No limit"
+              onChange={(e) =>
+                setSettings((current) => ({
+                  ...current,
+                  costLimitUsd: e.target.value === "" ? undefined : Math.max(0, Number(e.target.value)),
+                }))
+              }
+            />
+            <small>
+              A task that reaches it stops safely (work is kept) and asks you before spending more. Checked by
+              Workstream, not by the agents, using the prices above.
+            </small>
+          </label>
+          <label>
+            Tasks at the same time
+            <select
+              value={settings.parallelTasks ?? 2}
+              onChange={(e) => setSettings((current) => ({ ...current, parallelTasks: Number(e.target.value) }))}
+            >
+              <option value={1}>1 (one after another)</option>
+              <option value={2}>2</option>
+              <option value={3}>3</option>
+            </select>
+            <small>
+              Each task works in its own worktree. Commits, pushes and the tests before publishing still take turns
+              per project.
+            </small>
+          </label>
+        </div>
+      </section>
       <div className="settings-footer">
         <p>
           Engine, model and effort are captured when a task is created. Notes
@@ -2164,11 +2266,12 @@ function WorkflowPage() {
     <>
       <div className="page-heading">
         <div>
-          <div className="eyebrow">STRUCTURE THAT KEEPS YOU MOVING</div>
-          <h1>A deliberate path to delivery</h1>
+          <div className="eyebrow">HOW IT WORKS</div>
+          <h1>From task to pull request</h1>
           <p>
-            Portable skills guide the agents. The app keeps the process on
-            track.
+            Skills guide the agents. Workstream itself enforces the steps: the
+            agents cannot skip your approval, the independent review or the
+            tests before publishing.
           </p>
         </div>
         <Badge variant="secondary">Workflow v1</Badge>
@@ -2196,9 +2299,9 @@ function WorkflowPage() {
             text: "Run approved checks, then start a separate read-only reviewer. Return findings to the developer for up to two repair rounds.",
           },
           {
-            title: "Publish with evidence",
+            title: "Test, then publish with evidence",
             skill: "Application gate",
-            text: "Confirm the reviewed files are unchanged, honor commit hooks, push without force, and create or update the matching Azure DevOps pull request.",
+            text: "Run the project's unit and end-to-end tests on the task branch (Tests page), confirm the reviewed files are unchanged, honor commit hooks, push without force, and create or update the pull request on Azure DevOps or GitHub.",
           },
         ].map((item, i) => (
           <section className="workflow-detail-step" key={item.title}>
@@ -2218,10 +2321,34 @@ function WorkflowPage() {
         <ShieldCheck size={20} />
         <p>
           Worktrees and progress are preserved on failure. Workstream never
-          force-pushes, auto-merges, or updates your ticket system. A created PR
-          does not imply passing CI.
+          force-pushes or auto-merges, and only updates Jira when you press
+          Post to Jira. A created PR does not imply passing CI.
         </p>
       </div>
+      <section className="panel glossary">
+        <h2>Words you will see</h2>
+        <dl>
+          {[
+            ["Plan", "What the planner proposes to change, the acceptance criteria and the checks. Nothing is built until you approve it."],
+            ["Acceptance criteria", "The things that must be true when the task is done. Criteria marked Proposed are extras the planner suggested; they are left out unless you tick them."],
+            ["Checks", "Commands from the approved plan (for example lint or a test file) that Workstream runs after each development round."],
+            ["Independent review", "A separate, read-only agent that never saw how the code was written reviews the diff against the plan."],
+            ["Finding", "A problem the reviewer found in the code. Errors and warnings block publishing; info does not."],
+            ["Acceptance gap", "Something the reviewer could not confirm. Evidence: the agent can collect it. Needs you: only you can provide it. Outside the code: depends on other people or systems, and you can accept it with a reason."],
+            ["Repair round", "The developer fixing findings and failed checks. At most two automatically, then you decide."],
+            ["Verification", "An agent run that collects missing evidence, like a screenshot of the page, without changing code."],
+            ["Tests before publishing", "The project's unit and end-to-end tests, run on the task branch right before committing. A failure stops publishing."],
+            ["Change request", "New instructions for a finished task, before or after its pull request. It is planned, built and reviewed like a small task on the same branch."],
+            ["Worktree", "A separate folder with the task's branch, next to your repository, so tasks do not touch your own checkout or each other."],
+            ["Skills", "Short instructions for the agents, from the repository or generated from its code in Agents & models."],
+          ].map(([term, text]) => (
+            <div key={term}>
+              <dt>{term}</dt>
+              <dd>{text}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </>
   );
 }
@@ -2647,6 +2774,27 @@ function RunDetail({
             error={error}
           />
         )}
+      {run.costLimitHit && run.status !== "running" && (
+        <section className="panel detail-section cost-limit">
+          <h2>Cost limit reached</h2>
+          <p>
+            This task stopped at your cost limit of ${(snapshot.settings.costLimitUsd ?? 0).toFixed(2)} per task. Everything
+            the agents did is kept. Allow another ${(snapshot.settings.costLimitUsd ?? 0).toFixed(2)} and continue, or leave it
+            here.
+          </p>
+          <div className="button-row">
+            <Button
+              disabled={pending}
+              onClick={async () => {
+                if (await send({ type: "raiseCostLimit", runId: run.id })) await send({ type: "continue", runId: run.id });
+              }}
+            >
+              Allow ${(snapshot.settings.costLimitUsd ?? 0).toFixed(2)} more and continue
+            </Button>
+          </div>
+        </section>
+      )}
+      {run.testGate && <TestGatePanel run={run} send={send} pending={pending} />}
       {run.prUrl && run.stage === "complete" && !running && (
         <TaskE2e run={run} project={project} send={send} pending={pending} />
       )}

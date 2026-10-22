@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { executable } from "./process";
-import { detectDevCommand } from "./devserver";
+import { detectDevCommand, findLocalUrl } from "./devserver";
 import { probeSite } from "./e2e";
 
 export interface SiteState {
@@ -11,6 +11,8 @@ export interface SiteState {
   /** Last lines the dev server printed. */
   log: string[];
   error?: string;
+  /** Where the site answers (the given address, or the one the dev server printed). */
+  url?: string;
 }
 
 const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
@@ -25,7 +27,8 @@ export class Sites {
   readonly states = new Map<string, SiteState>();
   constructor(private onChange: () => void) {}
 
-  async start(projectId: string, repo: string, url: string) {
+  /** Starts the dev server. Without an address, waits for the one it prints (for example http://localhost:3000/). */
+  async start(projectId: string, repo: string, url?: string) {
     if (this.children.has(projectId)) return;
     const dev = await detectDevCommand(repo);
     if (!/^[A-Za-z0-9:_-]+$/.test(dev.script)) throw new Error("Unexpected dev command.");
@@ -65,15 +68,16 @@ export class Sites {
     // Wait until the site answers (Vite usually needs a few seconds).
     const deadline = Date.now() + 3 * 60_000;
     while (Date.now() < deadline && this.children.get(projectId) === child) {
-      if (await probeSite(url, 2000).catch(() => false)) {
-        state.status = "running";
+      const target = url ?? findLocalUrl(state.log.join("\n"));
+      if (target && (await probeSite(target, 2000).catch(() => false))) {
+        Object.assign(state, { status: "running", url: target });
         this.onChange();
         return;
       }
       await new Promise((done) => setTimeout(done, 1500));
     }
     if (this.children.get(projectId) === child) {
-      Object.assign(state, { status: "failed", error: `Nothing answered at ${url} within 3 minutes. See the log.` });
+      Object.assign(state, { status: "failed", error: `Nothing answered${url ? ` at ${url}` : ""} within 3 minutes. See the log.` });
       this.stop(projectId);
     }
   }
