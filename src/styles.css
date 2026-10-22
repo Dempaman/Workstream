@@ -5719,3 +5719,10 @@ a.scan-chip:hover {
   gap: 7px;
   color: light-dark(#8a5a00, #f2c15e);
 }
+.e2e-empty p {
+  margin: 0;
+  max-width: 820px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: light-dark(#36404c, #c3cede);
+}

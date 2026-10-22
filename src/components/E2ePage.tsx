@@ -472,7 +472,8 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
   const projects = snapshot.projects.filter((p) => !p.archived);
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const project = projects.find((p) => p.id === projectId) ?? projects[0];
-  const [name, setName] = useState("Checkout: log in, buy a product and complete the order");
+  const [name, setName] = useState("");
+  const [setupFor, setSetupFor] = useState("");
   if (!project)
     return (
       <div className="page-heading">
@@ -487,6 +488,8 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
     ? (project.repoTests ?? []).map((t) => ({ id: t.id, name: t.title, file: t.file, result: t.result }))
     : (project.journeys ?? []).map((j) => ({ id: j.id, name: j.name, result: j.lastResult }));
   const busy = Boolean(project.e2eActivity);
+  // Projects without a Playwright suite only see the journey setup when they use it, or ask for it.
+  const showJourneys = repo || Boolean(project.e2e) || items.length > 0 || setupFor === project.id;
   return (
     <>
       <div className="page-heading">
@@ -499,7 +502,9 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
             out.{" "}
             {repo
               ? `End-to-end tests come from the repository's own Playwright suite (${project.e2eConfig}), the same ones you run in VS Code.`
-              : "End-to-end journeys you record here are kept in Workstream, not in the repository."}
+              : showJourneys
+                ? "End-to-end journeys you record here are kept in Workstream, not in the repository."
+                : ""}
           </p>
         </div>
         <label className="e2e-project">
@@ -513,10 +518,10 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </select>
         </label>
       </div>
-      {!!project.testScan?.length && (
+      {project.testScan?.some((kind) => kind.files > 0) && (
           <div className="test-scan overview">
             <span className="muted-note">In {project.name}:</span>
-            {project.testScan.map((kind) => (
+            {project.testScan.filter((kind) => kind.files > 0).map((kind) => (
               <a
                 key={kind.id}
                 href={kind.id === "playwright" ? "#e2e-tests" : kind.id === "vitest" || kind.id === "jest" ? "#unit-tests" : undefined}
@@ -536,8 +541,25 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </section>
         )
       ) : (
-        <Settings key={project.id} project={project} send={send} pending={pending} />
+        showJourneys && <Settings key={project.id} project={project} send={send} pending={pending} />
       )}
+      {!showJourneys ? (
+        <section className="panel e2e-journeys e2e-empty" id="e2e-tests">
+          <h2>
+            <Waypoints size={16} /> End-to-end tests
+          </h2>
+          <p>
+            {project.name} has no end-to-end tests. They are for projects with a site you can open in a browser, like a web
+            shop. Add a Playwright suite to the repository (a playwright.config file and an e2e folder) and it shows up here
+            by itself, or record journeys that are kept only in Workstream.
+          </p>
+          <div className="button-row">
+            <Button variant="outline" onClick={() => setSetupFor(project.id)}>
+              <Waypoints size={14} /> Record journeys in Workstream
+            </Button>
+          </div>
+        </section>
+      ) : (
       <section className="panel e2e-journeys" id="e2e-tests">
         <div className="e2e-journeys-head">
           <div>
@@ -591,7 +613,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
         <div className="e2e-new">
           <label>
             {repo ? "New test (saved in the repository's e2e folder)" : "New journey"}
-            <input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />
+            <input value={name} maxLength={120} placeholder="For example: Checkout: log in, buy a product and complete the order" onChange={(e) => setName(e.target.value)} />
           </label>
           <Button
             disabled={pending || busy || !project.e2e || !name.trim()}
@@ -602,13 +624,19 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </Button>
         </div>
         <details className="e2e-howto" open={!items.length || items.every((i) => i.result?.status === "skipped")}>
-          <summary>How to record a good checkout journey</summary>
+          <summary>How to record a good journey</summary>
           <ol>
-            <li>Make sure the site is running (Start site), then press Record. A browser opens on the test site with a recorder bar.</li>
-            <li>Log in with the test account. Type the user name and password you saved above: Workstream swaps them for the saved account, so they are never stored in the journey.</li>
-            <li>Go to the product page, add it to the cart, open the cart and check out.</li>
-            <li>Choose the payment method your test account can use (invoice, or an Adyen test card) and place the order.</li>
-            <li>On the confirmation page, pick the recorder's "Assert visibility" tool and click the thank-you heading. That is what makes the test prove the order went through.</li>
+            <li>Make sure the site is running, then press Record. A browser opens on the site with a recorder bar.</li>
+            <li>
+              If the journey needs a login, type the test account{" "}
+              {repo ? "from .env.local" : "you saved above"}: Workstream swaps it for environment variables, so it is never
+              stored in the test.
+            </li>
+            <li>Click through the journey the way a user would, for example add a product to the cart and check out.</li>
+            <li>
+              On the last page, pick the recorder's "Assert visibility" tool and click something that proves it worked, such
+              as a confirmation heading. Without it the test only proves the clicks worked.
+            </li>
             <li>
               Close the browser window.{" "}
               {repo
@@ -618,6 +646,7 @@ export function E2ePage({ snapshot, pending, send }: { snapshot: Snapshot; pendi
           </ol>
         </details>
       </section>
+      )}
       <UnitTests project={project} send={send} pending={pending} />
     </>
   );
